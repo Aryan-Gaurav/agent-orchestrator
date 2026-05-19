@@ -1,0 +1,49 @@
+id: feature-dev
+description: "Design → HLD → LLD → Impl plan → Incremental impl"
+artifacts_dir: ./workflow-artifacts
+project_id: my-project
+
+inputs:
+  - name: feature_description
+    path: ./feature.md
+
+steps:
+  - id: design_doc
+    type: agent
+    agent: claude-code
+    prompt: |
+      Read the feature description at {{inputs.feature_description}}.
+      Write a design doc covering scope and UX.
+      Save to {{outputs.design}}.
+    outputs:
+      design: design.md
+    timeout_minutes: 30
+
+  - id: design_review
+    type: human_approval
+    depends_on: [design_doc]
+    message: |
+      Review workflow-artifacts/design.md.
+      Approve to proceed, or reject with feedback to regenerate.
+    on_reject: design_doc
+    max_revisions: 5
+
+  - id: hld
+    type: agent
+    agent: claude-code
+    depends_on: [design_review]
+    inputs:
+      design: design.md
+    prompt: |
+      Using {{inputs.design}}, write an HLD covering services, data flow,
+      schema, and external APIs. Save to {{outputs.hld}}.
+    outputs:
+      hld: hld.md
+    timeout_minutes: 45
+
+  - id: hld_review
+    type: human_approval
+    depends_on: [hld]
+    message: "Review workflow-artifacts/hld.md"
+    on_reject: hld
+    max_revisions: 5
