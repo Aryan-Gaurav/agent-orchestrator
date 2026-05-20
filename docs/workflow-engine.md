@@ -1089,6 +1089,18 @@ linter (§17) catches the obvious failures of this rule — too few
 citations on a step that consumed multiple inputs, too many citations
 relative to output length.
 
+### Reader Behavior
+
+When an agent reads a downstream artifact and encounters a citation, it
+treats the citation as a navigable pointer: resolve the cited file,
+locate the cited section, verify the current artifact is still
+consistent with it. The agent does not need to do this for every
+citation — only when the surrounding text looks inconsistent with the
+claim, or when the agent's own task requires verifying the claim's
+current truth, or when the agent is propagating the claim forward. §17.3
+spells out the decision rule the agent uses; §17.1 provides the
+resolver script that makes the hop deterministic and cheap.
+
 ### Citation Format
 
 Markdown artifacts use HTML comment markers (invisible in rendered
@@ -1259,17 +1271,20 @@ node .ao/aow-ref "design.md#auth-flow"
 {
   "ok": true,
   "ref": "design.md#auth-flow",
-  "resolved_path": "/abs/path/workflow-artifacts/design.md",
+  "artifact_relative_path": "design.md",
   "section_heading": "## Auth Flow",
   "section_content": "Users log in with email + password. We never store passwords; we use a one-way bcrypt hash with cost factor 12.\n",
   "outgoing_refs": [],
-  "claim_match": null,
-  "hop_id": "h-7f3c"
+  "claim_match": null
 }
 ```
 
-For a ref with a claim, the agent can also pass the claim to get a
-substring match against the section content:
+`artifact_relative_path` is the path relative to `artifacts_dir`. The
+agent can pass this directly back to the resolver, or read the file
+itself if it wants broader context than the cited section.
+
+For a ref with a claim, the agent passes the claim to get a tiered match
+result against the section content:
 
 ```bash
 node .ao/aow-ref "design.md#auth-flow" --claim "bcrypt cost factor 12"
@@ -1279,14 +1294,40 @@ node .ao/aow-ref "design.md#auth-flow" --claim "bcrypt cost factor 12"
 {
   "ok": true,
   "ref": "design.md#auth-flow",
-  "resolved_path": "...",
+  "artifact_relative_path": "design.md",
   "section_heading": "## Auth Flow",
   "section_content": "...",
   "outgoing_refs": [],
-  "claim_match": { "found": true, "match_kind": "exact_substring" },
-  "hop_id": "h-7f3c"
+  "claim_match": {
+    "found": true,
+    "match_kind": "exact_substring",
+    "confidence": 1.0
+  }
 }
 ```
+
+**Tiered claim matching.** The resolver attempts three matchers in order
+and returns the first that succeeds:
+
+1. **`exact_substring`** — case-sensitive, whitespace-preserved substring
+   match. `confidence: 1.0`.
+2. **`normalized_substring`** — lowercase both sides, collapse
+   whitespace to single spaces, strip surrounding punctuation, then
+   substring match. `confidence: 0.85`.
+3. **`token_overlap`** — tokenize the claim (drop stopwords, drop tokens
+   < 4 chars). Match if every remaining token appears somewhere in the
+   section content. `confidence` = (matched tokens / total tokens), with
+   a floor of 0.5 to register a match at this tier.
+
+If none of the three matches, `claim_match` is
+`{ "found": false, "match_kind": null, "confidence": 0.0 }` and the
+top-level `ok` becomes `false` with `error: "claim_mismatch"`. See
+failure cases below.
+
+The linter (§17.2) decides what to do with each tier: exact and
+normalized matches pass silently; `token_overlap` with confidence < 0.7
+emits a warning but does not fail the step; missing matches fail the
+step.
 
 **Failure cases (stdout still valid JSON, exit code non-zero):**
 
@@ -1304,7 +1345,7 @@ Error kinds (closed set):
 
 - `file_not_found` — cited file does not exist
 - `section_not_found` — file exists, anchor doesn't
-- `claim_mismatch` — claim provided but substring not found in section
+- `claim_mismatch` — claim provided but no tier matched
 - `malformed_ref` — input string didn't parse as a valid ref
 - `outside_artifacts_dir` — resolved path escapes `artifacts_dir`
   (security guard)
@@ -1322,12 +1363,11 @@ it. The exact schema lives in
 
 ```json
 {
-  "hop_id": "h-7f3c",
   "ts": "2026-05-21T09:14:00Z",
   "step_id": "impl_plan",
   "ref": "design.md#auth-flow",
   "outcome": "ok",
-  "from_step_output": false
+  "match_kind": "exact_substring"
 }
 ```
 
@@ -1353,15 +1393,21 @@ equivalent) found in an output:
    blocked.
 3. **Section anchor exists** — slugify headings in target file,
    match against the cited slug.
-4. **Claim substring match** — if `claim="..."` is present, check that
-   the claim string appears as a substring in the cited section's
-   content. Whitespace-normalized, case-sensitive.
+4. **Claim match (tiered)** — if `claim="..."` is present, the linter
+   invokes the resolver with `--claim` and inspects the `claim_match`
+   field of the response. Tier policy:
+   - `exact_substring` → pass silently
+   - `normalized_substring` → pass silently
+   - `token_overlap` with `confidence ≥ 0.7` → pass with a warning
+     attached
+   - `token_overlap` with `confidence < 0.7` → fail
+   - No match (resolver returns `error: "claim_mismatch"`) → fail
 
 Any failure → step marked `failed` with `failure_reason:
 "citations_invalid"` and the linter report attached. The agent re-runs
 via the existing `prependFeedback` machinery, with feedback containing
 the exact linter complaints (which ref, which check failed, what was
-expected).
+expected, what was found).
 
 **Per-output density checks (soft — warnings only):**
 
@@ -1378,10 +1424,10 @@ a step's prompt needs adjustment.
 **Claim integrity check across steps (hard):**
 
 If output A cites file B#section with `claim="X"`, the linter runs the
-resolver script against B#section with `--claim X` and requires a match.
-This is the same check the resolver provides, run by the engine, not the
-agent. It catches the case where the agent fabricated a claim that the
-cited section doesn't actually support.
+resolver script against B#section with `--claim X` and applies the tier
+policy above. This catches the case where the agent fabricated a claim
+that the cited section doesn't actually support, while still tolerating
+minor paraphrasing.
 
 ### 17.3 Prompt Contract Additions
 
@@ -1491,6 +1537,11 @@ prompt-template.ts.
 - MCP-native resolver tool — the script does the job; the MCP version
   is a port, not a redesign, and can come later when AO exposes the
   right plugin slot
+- `origin-ref:` marker (a citation pointing to the original source of a
+  fact when the chain is several hops long) — considered, dropped.
+  Single-hop citations + the resolver's cheap traversal cover the same
+  need without adding a second citation type. May revisit if workflows
+  routinely exceed 8 hops.
 - Section-renaming heuristics (fuzzy slug match) — out. If a section is
   renamed, that's a real change and should surface as a citation
   failure, not be papered over.
