@@ -4,6 +4,24 @@
 
 export { parseWorkflowDefinition } from "./schema.js";
 export {
+  copyArtifact,
+  hashFile,
+  hashesEqual,
+  resolveArtifactPath,
+  verifyArtifact,
+  type CopyArtifactResult,
+} from "./artifact-store.js";
+export {
+  createRunState,
+  loadRunState,
+  runStateSchema,
+  saveRunState,
+  updateStep,
+} from "./state-store.js";
+export {
+  ArtifactStoreError,
+  LockTimeoutError,
+  StateStoreError,
   StepNotFoundError,
   WorkflowCycleError,
   WorkflowError,
