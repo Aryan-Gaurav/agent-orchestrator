@@ -683,9 +683,32 @@ The package will be built across multiple AO sessions, each opening a PR against
 - All `aow` commands functional
 - Resume after crash works (kill mid-run, re-run, state recovered)
 
-### Phase 3 — Real AO integration (1 session)
-**Files:** Wire to real `@aoagents/ao-core` instead of mocks; integration test against a real AO project
-**Acceptance:** examples/hello-world runs end-to-end with a real `ao spawn`
+### Phase 3 — Real AO integration + Reference enforcement (1 session)
+**Files:**
+- Wire to real `@aoagents/ao-core` instead of mocks; integration test against
+  a real AO project
+- `packages/workflow/src/resolver/script.ts` — `.ao/aow-ref` resolver script
+  source (per §17.1)
+- `packages/workflow/src/resolver/schema.ts` — Zod schema for resolver output,
+  shared by script and engine
+- `packages/workflow/src/citation-linter.ts` — post-step citation linter
+  invoked from step-runner before marking `completed` (per §17.2)
+- `prompt-template.ts` extension: citation-contract footer added to
+  `appendExecutionContract` (per §17.3)
+- Workspace setup: drop `.ao/aow-ref` into each agent's worktree at spawn
+- `aow show --hops`: surface citation linter warnings and `.ao/ref-hops.jsonl`
+  trail per step
+- Tests for resolver, linter, schema, and prompt-contract integration
+
+**Acceptance:**
+- examples/hello-world runs end-to-end with a real `ao spawn`
+- Resolver script returns schema-valid JSON for happy path and all 5 error
+  kinds; engine validates output via Zod and surfaces failures
+- Linter rejects outputs with broken/fabricated citations and feeds back
+  via `prependFeedback`
+- Citation density warnings surface on `aow show` without failing the step
+- Footer is auto-appended to every agent prompt (no per-step author work
+  required)
 
 ### Phase 4 — Examples + docs (1 session)
 **Files:** examples/*, README.md, `aow --help` polish
@@ -1051,30 +1074,30 @@ By step 6 of a workflow, the agent producing `impl-plan.md` is several
 hops removed from the original `design.md` it should be implementing. The
 risk: each intermediate step paraphrases, the original intent gets
 diluted, and by step 8 the implementation contradicts the design doc
-written in step 1. **This section defines the convention that prevents
-that drift.**
+written in step 1. **This section defines the citation format that prevents
+that drift. §17 specifies the enforcement mechanism.**
 
 ### The Rule
 
-**Every artifact must cite, inline, every upstream file (and section
-within that file) it drew material from.** Citations live in the artifact
-itself, not in metadata.
+**Add a citation only when an upstream fact drove a decision in this
+section of the output.** Reading upstream for context but not lifting a
+specific claim → no citation. Copying a number, a constraint, a contract,
+or a design choice from upstream → citation required.
 
-When an agent reads a downstream artifact and encounters a citation, it
-treats the citation as a navigable pointer: open the cited file, locate
-the cited section, verify the current artifact is still consistent with
-it.
+The intent is judgment-based: citations track decisions, not reading. The
+linter (§17) catches the obvious failures of this rule — too few
+citations on a step that consumed multiple inputs, too many citations
+relative to output length.
 
 ### Citation Format
 
 Markdown artifacts use HTML comment markers (invisible in rendered
-output, parseable by both humans and agents):
+output, parseable by both humans and tooling):
 
 ```markdown
 ## AuthService class schema
 
-<!-- ref: hld.md#service-boundaries -->
-<!-- ref: design.md#auth-flow -->
+<!-- ref: hld.md#service-boundaries claim="AuthService owns password hashing" -->
 
 The AuthService exposes three methods:
 - `login(username, password) → Session`
@@ -1082,108 +1105,75 @@ The AuthService exposes three methods:
 ```
 
 For non-markdown artifacts (JSON, YAML, code), use the host language's
-comment syntax with the same `ref:` prefix:
+comment syntax with the same payload:
 
 ```typescript
-// ref: lld.md#authservice-class-schema
+// ref: lld.md#authservice-class-schema claim="bcrypt cost factor 12"
 export class AuthService { ... }
 ```
 
+**Required attributes:**
+- `<file>` — path relative to `artifacts_dir`, or absolute
+- `#<section>` — heading slug, kebab-case, GitHub-Markdown convention.
+  File-level refs (no `#`) are permitted only when the entire file is the
+  source (rare)
+- `claim="..."` — one short sentence: the load-bearing assertion from the
+  cited section that this output is taking as given. Not a summary —
+  the specific fact being inherited
+
+The claim is the contract. It lets a reader verify in one substring check
+whether the cited section still backs the claim, without re-reading the
+section in full.
+
+### Single-Hop Propagation (Model B)
+
+Citations point **one hop back** — to the immediate upstream that this
+artifact consumed, not to the original source of the fact.
+
+If `lld.md` got the bcrypt-12 constraint from `hld.md`, the LLD section
+that uses bcrypt-12 cites `hld.md`, not `design.md`. To trace bcrypt-12
+back to design.md, a reader hops: open hld.md, find its citation, follow
+it. The hop is cheap (§17 resolver script returns just the cited section,
+not the whole file).
+
+**Why single-hop:** prevents the citation list from ballooning at deep
+steps. By step 7 the artifact still cites only its direct inputs — the
+chain to design.md exists, but is walked, not enumerated.
+
+**Multi-hop happens at read time, by the agent, when verification
+requires it.** §17 prompt contract instructs agents to follow the chain
+as deep as needed.
+
 ### Citation Granularity
 
-- **File-level** when the entire file is the source: `<!-- ref: design.md -->`
-- **Section-level** when only one section informed this content:
-  `<!-- ref: design.md#auth-flow -->` (heading slug, kebab-case, same
-  convention as GitHub Markdown anchors)
-- **Multiple sources** stacked as separate comments, not merged into one
+- **Section-level** is the default: `<!-- ref: design.md#auth-flow claim="..." -->`
+- **File-level** only when the whole file is the source: `<!-- ref: design.md claim="..." -->`
+- **Multiple sources** stacked as separate comments, not merged
 
-A single section of output should rarely cite more than 3 sources. If it
-does, the step is probably doing too much and should be split.
+A single output section should rarely cite more than 3 sources. If it
+does, the step is probably doing too much and should be split. §17
+linter warns when density exceeds healthy bounds.
 
-### Author Responsibilities (Prompt Writers)
+### Where Citations Live
 
-When you write the prompt for an agent step, **explicitly instruct the
-agent** to:
+Citations live in the artifact itself, not in metadata. No state.json
+sidecar to keep in sync; no JSON schema for refs. The file is the
+contract.
 
-1. Cite every upstream artifact section it lifts requirements from, using
-   the format above
-2. Before writing each major section of the output, re-read the cited
-   upstream sections to verify alignment
-3. If during writing the agent finds a contradiction between the
-   downstream task and an upstream source, **stop and surface it** rather
-   than silently resolving it
-
-The execution contract footer (§4) should be extended to include this.
-Suggested addition for `appendExecutionContract`:
-
-```
-=== REFERENCE PRESERVATION ===
-When you produce output, cite every upstream file you draw from using:
-  <!-- ref: <filename>#<section-slug> -->
-inline in the relevant section.
-
-Before writing each major section, re-read the cited sources to verify
-your output is consistent with them. If you find a contradiction, stop
-and report it in your output rather than silently choosing.
-=== END REFERENCE PRESERVATION ===
-```
-
-### Reader Responsibilities (Agents Consuming Artifacts)
-
-When an agent reads any artifact and encounters `<!-- ref: X#Y -->`, it
-must:
-
-1. **Resolve the path.** The reference is relative to `artifacts_dir`
-   unless absolute. The path is the same path the engine uses, so it
-   exists on disk if the upstream step completed.
-2. **Verify section availability.** Read the cited file, navigate to the
-   cited section (heading match by slug).
-3. **Read only what's relevant.** Don't read the whole upstream file
-   blindly. The section anchor is the contract for relevance.
-4. **Verify alignment.** Before acting on the downstream artifact's
-   requirement, confirm the upstream section still supports it. If
-   upstream has changed in a way that invalidates downstream, flag it.
-
-This is part of agent behavior, not engine behavior. The prompt for each
-step should remind the agent of this responsibility.
-
-### Why This Works (and Why It's Not Enforced By Code)
-
-- **Markdown anchors** are stable enough for human-edited docs and
-  Claude/Codex handle them reliably
-- **Inline citations** travel with the artifact — copy the file
-  elsewhere and the lineage moves with it
-- **No metadata sidecar** to keep in sync (citations live in the
-  artifact, not in state.json)
-- **Engine doesn't enforce** because static enforcement is brittle
-  (section renames break it, the agent always knows context better than
-  a linter could). The convention is in the prompt, in the doc, and in
-  the execution contract — that is sufficient
-
-### What Happens When References Break
-
-Three failure modes and the desired response:
-
-| Failure | Detection | Response |
-|---|---|---|
-| Cited file no longer exists | Reader agent gets file-not-found | Agent flags it in its output: "cannot verify <ref>"; step proceeds but the gap is visible |
-| Cited section removed (file renamed sections) | Reader agent finds the file but not the anchor | Same — flag and proceed |
-| Cited section semantically changed but anchor stable | Reader agent reads new content and sees mismatch with what it was asked to produce | Agent surfaces the contradiction in its output and (if `human_approval` is downstream) the reviewer catches it |
-
-None of these are silent failures. The point of the convention is to
-keep them surfaceable rather than buried.
+This also means: copy the artifact elsewhere and the lineage moves with
+it; render the markdown and citations stay invisible to readers; diff
+two versions and citation changes are visible.
 
 ### Tradeoff with §14
 
 §14 says prompt-level references shouldn't be in `inputs:` because they
-shouldn't auto-invalidate the step. §16 says those same files should be
-cited inline. **Both stand.** A reference can be:
+shouldn't auto-invalidate the step. §16 says when an upstream fact drives
+a decision, the output must cite it. **Both stand.** A file can be:
 
-- Mentioned in the prompt as an *available* upstream file (§14)
-- Cited inline in the agent's output to track lineage (§16)
-- NOT in the `inputs:` map (no automatic staleness — agent will catch
-  drift on next downstream read via §16 verification, not via hash
-  comparison)
+- Mentioned in the prompt as an *available* upstream (§14)
+- Cited inline in the output where it drove a decision (§16)
+- NOT in the `inputs:` map (no automatic staleness — drift caught by
+  §17 linter and by reader-agent verification, not by hash)
 
 The two mechanisms cover different failure modes: §14 keeps the
 staleness graph minimal; §16 keeps the semantic lineage intact.
@@ -1204,20 +1194,20 @@ one-way bcrypt hash with cost factor 12.
 ```markdown
 ## Service Boundaries
 
-<!-- ref: design.md#auth-flow -->
+<!-- ref: design.md#auth-flow claim="bcrypt cost factor 12" -->
 
 The AuthService owns:
 - Password hashing (bcrypt cost 12, per design)
 - Session token issuance
 ```
 
-`lld.md` (step 5) elaborates:
+`lld.md` (step 5) elaborates (note: cites hld.md, **not** design.md —
+single-hop):
 
 ```markdown
 ## AuthService class schema
 
-<!-- ref: hld.md#service-boundaries -->
-<!-- ref: design.md#auth-flow -->
+<!-- ref: hld.md#service-boundaries claim="bcrypt cost factor 12" -->
 
 class AuthService {
   hash(password: string): Promise<string>  // bcrypt, cost=12
@@ -1226,12 +1216,286 @@ class AuthService {
 }
 ```
 
-When the step-7 implementation agent reads `lld.md`, it sees both refs.
-It opens `design.md#auth-flow`, confirms the bcrypt-12 requirement, and
-implements accordingly. If by step 7 someone has edited `design.md` to
-specify bcrypt cost 14, the step-7 agent reads the *new* design.md,
-notices the LLD says cost 12 but design says cost 14, and surfaces the
-contradiction rather than silently picking one.
+`impl-plan.md` (step 7) cites lld.md. If the step-7 agent wants to
+verify the original source of the bcrypt-12 constraint, it follows the
+chain via the resolver tool (§17): lld → hld → design. Three hops,
+each returning only the cited section, total cost a few hundred tokens.
+
+If someone edits `design.md` to change bcrypt cost to 14 between steps 5
+and 7:
+- The hld.md citation still says `claim="bcrypt cost factor 12"`
+- The §17 linter on the next step that re-runs hld.md (if any) would
+  check `design.md#auth-flow` for the substring "bcrypt cost factor 12"
+  and fail — surfacing the drift
+- A step-7 agent that follows the chain to design.md sees the
+  contradiction directly and flags it in its output
+
+---
+
+## 17. Reference Resolution and Bloat Control (Phase 3)
+
+§16 defines the format. This section defines how the engine **enforces**
+the format and gives agents a deterministic way to traverse references
+without bloating prompt context.
+
+Three pieces, all delivered in Phase 3:
+
+### 17.1 Resolver Script — `.ao/aow-ref`
+
+The engine writes a small Node script into each agent's worktree at
+`.ao/aow-ref` during workspace setup. Agents call it via their existing
+Bash tool to resolve any citation. No new MCP tool, no AO plugin work
+required.
+
+**Usage (from agent's Bash tool):**
+
+```bash
+node .ao/aow-ref "design.md#auth-flow"
+```
+
+**Output (stdout, JSON):**
+
+```json
+{
+  "ok": true,
+  "ref": "design.md#auth-flow",
+  "resolved_path": "/abs/path/workflow-artifacts/design.md",
+  "section_heading": "## Auth Flow",
+  "section_content": "Users log in with email + password. We never store passwords; we use a one-way bcrypt hash with cost factor 12.\n",
+  "outgoing_refs": [],
+  "claim_match": null,
+  "hop_id": "h-7f3c"
+}
+```
+
+For a ref with a claim, the agent can also pass the claim to get a
+substring match against the section content:
+
+```bash
+node .ao/aow-ref "design.md#auth-flow" --claim "bcrypt cost factor 12"
+```
+
+```json
+{
+  "ok": true,
+  "ref": "design.md#auth-flow",
+  "resolved_path": "...",
+  "section_heading": "## Auth Flow",
+  "section_content": "...",
+  "outgoing_refs": [],
+  "claim_match": { "found": true, "match_kind": "exact_substring" },
+  "hop_id": "h-7f3c"
+}
+```
+
+**Failure cases (stdout still valid JSON, exit code non-zero):**
+
+```json
+{
+  "ok": false,
+  "ref": "design.md#auth-flow",
+  "error": "section_not_found",
+  "message": "File exists but no heading with slug 'auth-flow' was found.",
+  "available_sections": ["overview", "user-flow", "data-retention"]
+}
+```
+
+Error kinds (closed set):
+
+- `file_not_found` — cited file does not exist
+- `section_not_found` — file exists, anchor doesn't
+- `claim_mismatch` — claim provided but substring not found in section
+- `malformed_ref` — input string didn't parse as a valid ref
+- `outside_artifacts_dir` — resolved path escapes `artifacts_dir`
+  (security guard)
+
+**Schema verification.** The script's output is validated by a Zod schema
+on both ends — the script asserts before printing, and the engine
+asserts when reading the script's stdout (for example when the resolver
+is invoked by the linter, not just by the agent). If output doesn't
+match the schema, the engine treats it as a tool failure and surfaces
+it. The exact schema lives in
+`packages/workflow/src/resolver/schema.ts` next to the script source.
+
+**Hop log.** Every invocation appends one JSON line to
+`.ao/ref-hops.jsonl`:
+
+```json
+{
+  "hop_id": "h-7f3c",
+  "ts": "2026-05-21T09:14:00Z",
+  "step_id": "impl_plan",
+  "ref": "design.md#auth-flow",
+  "outcome": "ok",
+  "from_step_output": false
+}
+```
+
+The engine reads this on `aow show <run-id> --hops` to surface a
+verification trail per step. Helps a human reviewer see what the agent
+actually checked.
+
+### 17.2 Post-Step Citation Linter
+
+After an agent step completes (outputs exist, activity idle), and BEFORE
+the engine marks the step `completed`, the linter runs over every output
+file.
+
+**Per-citation checks (hard — failure rejects the step):**
+
+For each `<!-- ref: file#section claim="..." -->` (or language-comment
+equivalent) found in an output:
+
+1. **Schema check** — ref string parses, `file` is non-empty, `claim` is
+   non-empty (if present). Citations without claims are warnings, not
+   errors, in v1.
+2. **File existence** — resolves under `artifacts_dir`. Path-escape
+   blocked.
+3. **Section anchor exists** — slugify headings in target file,
+   match against the cited slug.
+4. **Claim substring match** — if `claim="..."` is present, check that
+   the claim string appears as a substring in the cited section's
+   content. Whitespace-normalized, case-sensitive.
+
+Any failure → step marked `failed` with `failure_reason:
+"citations_invalid"` and the linter report attached. The agent re-runs
+via the existing `prependFeedback` machinery, with feedback containing
+the exact linter complaints (which ref, which check failed, what was
+expected).
+
+**Per-output density checks (soft — warnings only):**
+
+- Output has **0 citations** but the step declared **≥ 2 tracked
+  inputs** → warn
+- Output has **> (N × major_sections)** citations where N=3 → warn
+  (over-citation, likely noise)
+- A single output section (`### heading` block) has > 3 citations → warn
+
+Warnings don't fail the step. They're attached to the step state and
+surfaced on `aow show`. Pattern over time tells the prompt author whether
+a step's prompt needs adjustment.
+
+**Claim integrity check across steps (hard):**
+
+If output A cites file B#section with `claim="X"`, the linter runs the
+resolver script against B#section with `--claim X` and requires a match.
+This is the same check the resolver provides, run by the engine, not the
+agent. It catches the case where the agent fabricated a claim that the
+cited section doesn't actually support.
+
+### 17.3 Prompt Contract Additions
+
+The execution contract footer (§4) is extended with citation rules. The
+addition is auto-appended by `appendExecutionContract` to every agent
+prompt, so authors don't have to remember it.
+
+**Footer addition (informational tone, decision rules embedded):**
+
+```
+=== CITATION CONTRACT ===
+
+WRITING — add a citation only when an upstream fact drove a decision in
+this section of your output.
+  Format (markdown):   <!-- ref: <file>#<section> claim="..." -->
+  Format (code/JSON):  // ref: <file>#<section> claim="..."
+
+The "claim" is one short sentence — the load-bearing assertion you are
+taking as given from the cited section. Not a summary; the specific
+fact.
+
+Cite ONE HOP BACK: cite the artifact you actually consumed, not the
+original source of the fact. The chain is walked at read time, not
+enumerated at write time.
+
+DO NOT cite for context-only reading. Reading upstream for orientation
+without lifting a specific claim → no citation.
+
+READING — when you encounter a citation:
+  - You do NOT need to open the cited file unless one of these holds:
+      (a) the claim looks inconsistent with the surrounding output text
+      (b) your task explicitly requires verifying the claim's current
+          truth
+      (c) the claim is load-bearing for your output (you're propagating
+          it forward)
+
+  - To resolve a citation, prefer the resolver script over plain file
+    reads:
+        node .ao/aow-ref "<file>#<section>"
+        node .ao/aow-ref "<file>#<section>" --claim "<claim>"
+    Returns JSON with the resolved section content and any outgoing
+    citations from that section. Hop logs are recorded automatically.
+
+  - If verification requires following the chain further upstream
+    (e.g., hld.md cites design.md and you need the original source),
+    make additional hops. The resolver works the same at every step.
+
+PROPAGATION — if your output makes a decision that depends on a fact
+inherited from upstream, copy the citation forward (one hop) onto your
+own section. Do not re-cite the upstream's upstream.
+
+ERROR HANDLING — if the resolver returns ok=false:
+  - file_not_found / section_not_found: include an "## Open question"
+    block in your output flagging the broken ref. Do not invent content
+    to fill the gap.
+  - claim_mismatch: same — flag it explicitly. Upstream may have
+    changed in a way that breaks your task.
+=== END CITATION CONTRACT ===
+```
+
+Authors writing per-step prompts don't need to repeat any of this. They
+can — for an unusually high-stakes step, the prompt body might say "this
+step is load-bearing for the entire feature, follow the citation chain
+to design.md before writing anything." But the default contract above
+handles the common case.
+
+### 17.4 Failure-Mode Table
+
+| Failure | Detection | Response |
+|---|---|---|
+| Output has no citations but declared multiple tracked inputs | Linter density check | Warning attached to step; surfaces on `aow show` |
+| Output cites a file that doesn't exist | Linter file_not_found | Step fails, re-runs with feedback |
+| Output cites an anchor that doesn't exist in target file | Linter section_not_found | Step fails, re-runs with feedback |
+| Output's claim doesn't appear in cited section | Linter claim_mismatch | Step fails, re-runs with feedback |
+| Cited section was edited externally, claim no longer matches | Same as above on next run that consumes the cited section | Same — step fails, surfaces drift |
+| Agent reads upstream and finds genuine contradiction | Agent flags in output with `## Open question` block | Reviewer catches at the next human_approval gate |
+| Agent fabricates a citation (file looks plausible but claim is invented) | Linter claim_mismatch check | Step fails, re-runs with feedback |
+
+The combination of structural enforcement (linter) and prompt-level
+contract (resolver + decision rules) covers all known drift modes
+deterministically — no model judgment required for the structural part,
+and the semantic part has clear escalation paths.
+
+### 17.5 Scope and Cost
+
+What lives in Phase 3:
+
+- `packages/workflow/src/resolver/script.ts` — script source compiled
+  to `.ao/aow-ref` (or shipped via the agent workspace setup hook)
+- `packages/workflow/src/resolver/schema.ts` — Zod schema for resolver
+  output (used by script + engine)
+- `packages/workflow/src/citation-linter.ts` — linter invoked by the
+  engine in step-runner.ts before marking `completed`
+- Extension to `prompt-template.ts`: footer additions for the citation
+  contract
+- Tests for the linter, the resolver, and the schema
+- Updated `aow show` to surface citation warnings and hop trails
+
+Estimated LOC: ~600 across resolver + linter + tests, ~30 added to
+prompt-template.ts.
+
+### 17.6 Out of Scope (Phase 3)
+
+- `must_cite:` field on a step (hard list of required-to-cite files) —
+  considered, dropped. The linter's density warnings + claim integrity
+  check cover the same failure modes without adding YAML surface.
+- MCP-native resolver tool — the script does the job; the MCP version
+  is a port, not a redesign, and can come later when AO exposes the
+  right plugin slot
+- Section-renaming heuristics (fuzzy slug match) — out. If a section is
+  renamed, that's a real change and should surface as a citation
+  failure, not be papered over.
+- Cross-run reference resolution (refs into prior runs) — out. Refs
+  scope to the current run's `artifacts_dir`.
 
 ---
 
@@ -1249,4 +1513,8 @@ contradiction rather than silently picking one.
 - **Stale**: a completed step whose tracked inputs have changed since it last ran
 - **Cascade**: re-running downstream steps after an upstream step changes
 - **Sub-workflow** (Phase 5+): a step whose execution is itself a workflow; not in v1
-- **Reference / citation**: an inline `<!-- ref: <file>#<section> -->` marker in an artifact, pointing to the upstream source that informed that section (see §16)
+- **Reference / citation**: an inline `<!-- ref: <file>#<section> claim="..." -->` marker in an artifact, pointing one hop back to the upstream source that informed that section (see §16)
+- **Claim**: the short load-bearing sentence inside a citation's `claim="..."` attribute; the specific upstream fact this output is taking as given
+- **Resolver script**: `.ao/aow-ref`, dropped into each agent's worktree, returns schema-validated JSON for any citation; produces a hop log at `.ao/ref-hops.jsonl` (see §17.1)
+- **Citation linter**: post-step engine check that rejects outputs with malformed, dangling, or fabricated citations (see §17.2)
+- **Single-hop propagation (Model B)**: a citation points to the immediate upstream the output consumed, never to the original source of the fact; the chain is walked lazily by readers, not enumerated at write time (see §16)
