@@ -4,7 +4,10 @@ export type WorkflowErrorCode =
   | "WF_STEP_NOT_FOUND"
   | "WF_MISSING_INPUTS"
   | "WF_TEMPLATE"
-  | "WF_SELECTOR_CYCLE";
+  | "WF_SELECTOR_CYCLE"
+  | "WF_STATE_STORE"
+  | "WF_LOCK_TIMEOUT"
+  | "WF_ARTIFACT_STORE";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -97,6 +100,34 @@ export class CycleInSelectorResolutionError extends WorkflowError {
     );
     this.name = "CycleInSelectorResolutionError";
     this.cycle = cycle;
+  }
+}
+
+export class StateStoreError extends WorkflowError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("WF_STATE_STORE", message, options);
+    this.name = "StateStoreError";
+  }
+}
+
+export class LockTimeoutError extends WorkflowError {
+  readonly lockPath: string;
+
+  constructor(lockPath: string, options?: ErrorOptions) {
+    super(
+      "WF_LOCK_TIMEOUT",
+      `Timed out waiting for lock at ${lockPath}`,
+      options,
+    );
+    this.name = "LockTimeoutError";
+    this.lockPath = lockPath;
+  }
+}
+
+export class ArtifactStoreError extends WorkflowError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("WF_ARTIFACT_STORE", message, options);
+    this.name = "ArtifactStoreError";
   }
 }
 
