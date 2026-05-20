@@ -775,6 +775,309 @@ targeting feature/workflow-engine.
 
 ---
 
+## 14. Tracked Inputs vs. Prompt-Level References
+
+The `inputs:` map on an agent step is **not** a list of every file the agent
+might consult. It is the engine's contract for **what makes this step stale**.
+
+Two kinds of file consumption exist, and they are deliberately distinct:
+
+### Tracked inputs (the `inputs:` map)
+
+```yaml
+- id: impl_plan
+  depends_on: [lld_review]
+  inputs:
+    lld: lld.md           # ← change to lld.md invalidates this step
+  prompt: |
+    Using {{inputs.lld}}, write an implementation plan.
+    Reference the HLD at ./workflow-artifacts/hld.md and the design
+    doc at ./workflow-artifacts/design.md for context — read only
+    the sections you need (e.g., the auth-service section).
+```
+
+- Hashed on every run; mismatch → step marked `stale`
+- Path interpolated into prompt via `{{inputs.<name>}}`
+- Should be the **minimum set** of files whose change should re-run this step
+
+### Prompt-level references
+
+Mentions in the prompt body of files the agent *may* consult but whose changes
+should not auto-invalidate the step. The agent reads them on demand, only the
+sections it needs.
+
+- Not hashed
+- Not interpolated — write the absolute or `artifacts_dir`-relative path
+  directly in the prompt text
+- The agent is responsible for navigating to and reading the relevant sections
+
+### Why this matters
+
+Without this distinction, the `inputs:` list grows linearly with workflow
+depth. By step 8, the implementation-plan step would declare 7 prior outputs
+as inputs, each one creating a staleness dependency, every prompt template
+ballooning, and every minor edit to an early doc invalidating the entire
+downstream chain.
+
+The rule: **declare an input only when its change should re-trigger this
+step.** Everything else goes in the prompt as a referenced path the agent
+reads on its own initiative.
+
+### Author guidance for prompts with referenced files
+
+When writing a prompt that references files outside `inputs:`, tell the
+agent:
+
+1. The exact path (relative to `artifacts_dir` or absolute is fine)
+2. Which **sections** are relevant to its task (so it doesn't read the whole
+   file blindly when it only needs one chapter)
+3. That it should treat referenced files as **read-only context**, not
+   sources whose changes it should react to mid-task
+
+Example:
+
+```yaml
+prompt: |
+  Implement step 3 of the plan in {{inputs.plan}}.
+
+  Background reference (read only the listed sections, do not modify):
+  - ./workflow-artifacts/lld.md, section "AuthService class schema"
+  - ./workflow-artifacts/hld.md, section "Service boundaries"
+```
+
+The engine cares about `plan.md` (declared as input). The agent cares about
+`lld.md` and `hld.md` too, but the engine does not track them.
+
+### Tradeoff (honest)
+
+You lose strict reproducibility for referenced files — the agent reads
+whatever is on disk at the moment it asks. If `lld.md` changes mid-run, the
+agent could in theory see two different versions. For our use case this is
+fine: prompt-level references are stable docs that don't change during a
+single step's execution. If you need strict tracking, declare it as an
+input.
+
+---
+
+## 15. Phase 5+ Roadmap (Deferred)
+
+Phase 1–4 ship a sequential engine with file-based gates and a flat
+`artifacts_dir`. This section describes work explicitly NOT in v1, sketched
+just enough that today's design doesn't paint us into a corner.
+
+### 15.1 Parallel execution (fan-out / fan-in)
+
+**Current state:** Sequential only. The DAG is respected for dependency
+order, but two steps with no edge between them still run one at a time
+(§4 — "Phase 1 executes steps sequentially").
+
+**Desired:** When step B and step C both depend only on step A and have no
+edge between each other, run B and C concurrently after A completes. A
+downstream step D that depends on both B and C waits for both (a join).
+
+**What changes:**
+- Run loop becomes a worker pool with a configurable concurrency cap
+- State updates must be lock-protected (state-store.ts already has the
+  lock primitive; needs broader use)
+- Per-step logs need namespacing so parallel agents' output is readable
+- Approval gates with multiple upstream parallel steps wait for all of them
+
+**Why deferred:** AO sessions are heavyweight (one tmux + one git worktree
+per session). Most workflows are linear chains with occasional fan-out.
+Sequential first, parallel later, once the v1 model is proven.
+
+### 15.2 Sub-workflows (a step that is itself a workflow)
+
+**Motivation (from real cases):** The LLD step shouldn't be one prompt — it
+should be a writer producing a draft, an architect critiquing it, and a
+merger combining the two into the final LLD. Each role is its own agent
+session with its own PR, so a reviewer can audit drafts and critiques
+separately, not just the final merged doc.
+
+**Desired schema:**
+
+```yaml
+- id: lld
+  type: workflow
+  workflow: ./workflows/lld-with-review.yaml
+  inputs:
+    hld: hld.md
+  outputs:
+    lld: lld.md
+```
+
+The sub-workflow file (`lld-with-review.yaml`) is a normal workflow file.
+Its inputs are bound from the parent step's `inputs:`. Its outputs are
+exposed back to the parent via the same name mapping.
+
+**What changes:**
+- New `type: workflow` step in schema.ts
+- Engine recurses: a workflow step spawns a child run, waits for it, lifts
+  the child's terminal outputs back into the parent's artifact namespace
+- Run storage: `.workflow-state/runs/<parent>/children/<step-id>/`
+- Selectors compose: `aow run feature-dev --only lld.draft` to address a
+  step inside a sub-workflow
+- Approval gates in the sub-workflow surface up to `aow status` on the
+  parent (or stay scoped to the child — TBD)
+
+**Why deferred:** Until you actually need multi-role review *with humans
+auditing each role's output separately*, the agent-internal subagent pattern
+(prompt says "spawn a critic, merge feedback, produce final") covers it
+inside a single step. Sub-workflows become necessary the day you want a
+separate PR per role.
+
+### 15.3 Conditional branches
+
+**Motivation:** "If the CI step fails, run a debug step; otherwise skip
+straight to PR creation."
+
+**Desired:**
+
+```yaml
+- id: maybe_debug
+  when: "${ci.status} == 'failed'"
+  type: agent
+  ...
+```
+
+**What changes:**
+- A `when:` field on any step with an expression language (start with
+  literal equality on prior step states, expand if needed)
+- Skipped steps are recorded with `status: skipped` and don't block their
+  downstream dependents
+- Expression engine: keep small — string equality on artifact paths,
+  step status, attempt counts. No Turing-complete sandbox.
+
+**Why deferred:** YAGNI for the design → impl flow. Most current workflows
+are unconditional. Add when a real case demands it.
+
+### 15.4 Reviewer agent slot (architect / critic)
+
+**Motivation:** Distinct from sub-workflows — a single agent step where the
+engine knows there's a "primary" producer and a "reviewer" that must sign
+off before the step is considered complete.
+
+**Desired:**
+
+```yaml
+- id: lld
+  type: agent
+  agent: claude-code
+  reviewer:
+    agent: gpt-5
+    prompt: "Critique {{outputs.lld}} for ..."
+    must_approve: true
+  prompt: "Write LLD ..."
+  outputs:
+    lld: lld.md
+```
+
+The reviewer runs after the primary. If it approves, step completes. If it
+requests changes, primary re-runs with the critique as feedback (like a
+rejection cycle but agent-driven instead of human-driven).
+
+**What changes:**
+- Schema extension for the `reviewer:` block
+- Step runner becomes two-phase: produce → review → loop or commit
+- A new error class for reviewer-rejection-exceeds-cap
+
+**Why deferred:** This is a special case of sub-workflows. Better to ship
+the general primitive (15.2) than carve out one specific shape.
+
+### 15.5 Cross-run artifact references
+
+**Motivation:** "Phase 2 of feature X reuses the design doc from Phase 1."
+
+**Desired:** `--input design=@run:wf-feature-dev-20260520T120000/design.md`
+to pin a previous run's artifact as an input to a new run.
+
+**What changes:**
+- Selector / `--input` accepts a `@run:<run-id>/<artifact>` syntax
+- Engine resolves to the recorded file path, hashes, treats as immutable
+  input
+
+**Why deferred:** Easy to add when needed. For now, copy the file by hand.
+
+### 15.6 Dashboard integration
+
+**Motivation:** Watch a workflow run in the AO web dashboard alongside
+individual sessions.
+
+**Desired:** AO's web UI shows workflows as first-class entities. Run
+state.json is read via the same API surface as session metadata. Steps
+appear as a Kanban-style row across the dashboard.
+
+**What changes:**
+- New API routes in `packages/web/src/app/api/workflows/` and
+  `/runs/[id]/`
+- React components for the workflow grid view
+- SSE channel for state.json updates
+
+**Why deferred:** v1 is CLI-only by design (§2). The dashboard is
+worthwhile but separable; ship the engine first.
+
+### 15.7 Better staleness signals
+
+**Today:** sha256 over full file contents.
+
+**Future considerations:**
+- **Semantic staleness**: an edit to a comment in `design.md` shouldn't
+  invalidate downstream steps. Track a content hash that ignores
+  whitespace/comment churn. Hard to do generically (Markdown sections vs.
+  code vs. JSON) — defer until pain is real.
+- **Partial staleness**: if step 4 only consumed section 2 of design.md,
+  changing section 7 shouldn't invalidate step 4. Requires the agent to
+  record which sections it actually read, or the engine to track
+  section-level hashes. Major work.
+- **Time-based caching**: "this output is fresh for 24h regardless of
+  input changes" — for steps whose outputs are stable (e.g., a generated
+  reference doc). Add as a step-level field if needed.
+
+None of these are urgent. sha256-full-file is the right default.
+
+### 15.8 Concurrency safety
+
+**Today:** state-store.ts uses a lock file, but only the engine writes
+state. Approvals are file-based and atomic via rename.
+
+**Future:** Multiple `aow` invocations on the same run dir (e.g., one in
+watch mode, one running `aow status`). Need:
+- Read-mostly callers (status, show) bypass the write lock
+- Write callers contest the lock with reasonable timeout
+- Crashed processes leave stale lock files — needs PID-aware lock recovery
+
+Already mostly there in Phase 1a; just needs to be exercised by real
+multi-process use.
+
+### 15.9 Recovery and orphan reconciliation
+
+**Today:** If the engine crashes mid-run, state.json reflects the last
+committed transition. The user re-runs `aow resume`. If the agent's AO
+session is still alive in tmux but the engine is gone, the user must
+manually kill the session.
+
+**Future:** On `aow resume`, the engine queries AO for sessions matching
+the recorded session_id and reconciles:
+- Session still alive + outputs not yet produced → continue polling
+- Session dead + outputs present → mark step completed, hash, move on
+- Session dead + outputs missing → mark step failed
+- No session found → fresh attempt
+
+AO already has a recovery manager (per `packages/core/src/recovery/`); the
+engine just needs to consult it on resume.
+
+### 15.10 Multi-workflow runs in one repo
+
+**Today:** Per §12 decision, one `workflow.yaml` per repo is the assumed
+v1 case. The CLI accepts an explicit workflow ID, but examples assume the
+default.
+
+**Future:** `workflows/` directory with multiple files, `aow list` shows
+them all, `aow run <name>` is fully supported. Already lightly wired in
+the CLI from Phase 2; just needs documentation and a real test.
+
+---
+
 ## Glossary
 
 - **Workflow**: a YAML-defined DAG of steps
@@ -782,7 +1085,10 @@ targeting feature/workflow-engine.
 - **Step**: a node in the workflow (agent or approval gate)
 - **Attempt**: one execution of a step; rejected steps re-run as new attempts
 - **Artifact**: a file produced by a step or supplied as input; identified by path + sha256 hash
+- **Tracked input**: a file declared in a step's `inputs:` map; the engine hashes it and uses change as a staleness signal
+- **Prompt-level reference**: a file mentioned in a step's prompt body but NOT in `inputs:`; the agent reads it on demand, the engine does not track it
 - **Selector**: a CLI flag combination that determines which steps to run (`--only`, `--from`, etc.)
 - **Gate**: a human_approval step
-- **Stale**: a completed step whose inputs have changed since it last ran
+- **Stale**: a completed step whose tracked inputs have changed since it last ran
 - **Cascade**: re-running downstream steps after an upstream step changes
+- **Sub-workflow** (Phase 5+): a step whose execution is itself a workflow; not in v1
