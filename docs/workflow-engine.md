@@ -984,21 +984,7 @@ rejection cycle but agent-driven instead of human-driven).
 **Why deferred:** This is a special case of sub-workflows. Better to ship
 the general primitive (15.2) than carve out one specific shape.
 
-### 15.5 Cross-run artifact references
-
-**Motivation:** "Phase 2 of feature X reuses the design doc from Phase 1."
-
-**Desired:** `--input design=@run:wf-feature-dev-20260520T120000/design.md`
-to pin a previous run's artifact as an input to a new run.
-
-**What changes:**
-- Selector / `--input` accepts a `@run:<run-id>/<artifact>` syntax
-- Engine resolves to the recorded file path, hashes, treats as immutable
-  input
-
-**Why deferred:** Easy to add when needed. For now, copy the file by hand.
-
-### 15.6 Dashboard integration
+### 15.5 Dashboard integration
 
 **Motivation:** Watch a workflow run in the AO web dashboard alongside
 individual sessions.
@@ -1016,26 +1002,7 @@ appear as a Kanban-style row across the dashboard.
 **Why deferred:** v1 is CLI-only by design (§2). The dashboard is
 worthwhile but separable; ship the engine first.
 
-### 15.7 Better staleness signals
-
-**Today:** sha256 over full file contents.
-
-**Future considerations:**
-- **Semantic staleness**: an edit to a comment in `design.md` shouldn't
-  invalidate downstream steps. Track a content hash that ignores
-  whitespace/comment churn. Hard to do generically (Markdown sections vs.
-  code vs. JSON) — defer until pain is real.
-- **Partial staleness**: if step 4 only consumed section 2 of design.md,
-  changing section 7 shouldn't invalidate step 4. Requires the agent to
-  record which sections it actually read, or the engine to track
-  section-level hashes. Major work.
-- **Time-based caching**: "this output is fresh for 24h regardless of
-  input changes" — for steps whose outputs are stable (e.g., a generated
-  reference doc). Add as a step-level field if needed.
-
-None of these are urgent. sha256-full-file is the right default.
-
-### 15.8 Concurrency safety
+### 15.6 Concurrency safety
 
 **Today:** state-store.ts uses a lock file, but only the engine writes
 state. Approvals are file-based and atomic via rename.
@@ -1049,7 +1016,7 @@ watch mode, one running `aow status`). Need:
 Already mostly there in Phase 1a; just needs to be exercised by real
 multi-process use.
 
-### 15.9 Recovery and orphan reconciliation
+### 15.7 Recovery and orphan reconciliation
 
 **Today:** If the engine crashes mid-run, state.json reflects the last
 committed transition. The user re-runs `aow resume`. If the agent's AO
@@ -1066,7 +1033,7 @@ the recorded session_id and reconciles:
 AO already has a recovery manager (per `packages/core/src/recovery/`); the
 engine just needs to consult it on resume.
 
-### 15.10 Multi-workflow runs in one repo
+### 15.8 Multi-workflow runs in one repo
 
 **Today:** Per §12 decision, one `workflow.yaml` per repo is the assumed
 v1 case. The CLI accepts an explicit workflow ID, but examples assume the
@@ -1075,6 +1042,196 @@ default.
 **Future:** `workflows/` directory with multiple files, `aow list` shows
 them all, `aow run <name>` is fully supported. Already lightly wired in
 the CLI from Phase 2; just needs documentation and a real test.
+
+---
+
+## 16. Reference Preservation Across Steps
+
+By step 6 of a workflow, the agent producing `impl-plan.md` is several
+hops removed from the original `design.md` it should be implementing. The
+risk: each intermediate step paraphrases, the original intent gets
+diluted, and by step 8 the implementation contradicts the design doc
+written in step 1. **This section defines the convention that prevents
+that drift.**
+
+### The Rule
+
+**Every artifact must cite, inline, every upstream file (and section
+within that file) it drew material from.** Citations live in the artifact
+itself, not in metadata.
+
+When an agent reads a downstream artifact and encounters a citation, it
+treats the citation as a navigable pointer: open the cited file, locate
+the cited section, verify the current artifact is still consistent with
+it.
+
+### Citation Format
+
+Markdown artifacts use HTML comment markers (invisible in rendered
+output, parseable by both humans and agents):
+
+```markdown
+## AuthService class schema
+
+<!-- ref: hld.md#service-boundaries -->
+<!-- ref: design.md#auth-flow -->
+
+The AuthService exposes three methods:
+- `login(username, password) → Session`
+- ...
+```
+
+For non-markdown artifacts (JSON, YAML, code), use the host language's
+comment syntax with the same `ref:` prefix:
+
+```typescript
+// ref: lld.md#authservice-class-schema
+export class AuthService { ... }
+```
+
+### Citation Granularity
+
+- **File-level** when the entire file is the source: `<!-- ref: design.md -->`
+- **Section-level** when only one section informed this content:
+  `<!-- ref: design.md#auth-flow -->` (heading slug, kebab-case, same
+  convention as GitHub Markdown anchors)
+- **Multiple sources** stacked as separate comments, not merged into one
+
+A single section of output should rarely cite more than 3 sources. If it
+does, the step is probably doing too much and should be split.
+
+### Author Responsibilities (Prompt Writers)
+
+When you write the prompt for an agent step, **explicitly instruct the
+agent** to:
+
+1. Cite every upstream artifact section it lifts requirements from, using
+   the format above
+2. Before writing each major section of the output, re-read the cited
+   upstream sections to verify alignment
+3. If during writing the agent finds a contradiction between the
+   downstream task and an upstream source, **stop and surface it** rather
+   than silently resolving it
+
+The execution contract footer (§4) should be extended to include this.
+Suggested addition for `appendExecutionContract`:
+
+```
+=== REFERENCE PRESERVATION ===
+When you produce output, cite every upstream file you draw from using:
+  <!-- ref: <filename>#<section-slug> -->
+inline in the relevant section.
+
+Before writing each major section, re-read the cited sources to verify
+your output is consistent with them. If you find a contradiction, stop
+and report it in your output rather than silently choosing.
+=== END REFERENCE PRESERVATION ===
+```
+
+### Reader Responsibilities (Agents Consuming Artifacts)
+
+When an agent reads any artifact and encounters `<!-- ref: X#Y -->`, it
+must:
+
+1. **Resolve the path.** The reference is relative to `artifacts_dir`
+   unless absolute. The path is the same path the engine uses, so it
+   exists on disk if the upstream step completed.
+2. **Verify section availability.** Read the cited file, navigate to the
+   cited section (heading match by slug).
+3. **Read only what's relevant.** Don't read the whole upstream file
+   blindly. The section anchor is the contract for relevance.
+4. **Verify alignment.** Before acting on the downstream artifact's
+   requirement, confirm the upstream section still supports it. If
+   upstream has changed in a way that invalidates downstream, flag it.
+
+This is part of agent behavior, not engine behavior. The prompt for each
+step should remind the agent of this responsibility.
+
+### Why This Works (and Why It's Not Enforced By Code)
+
+- **Markdown anchors** are stable enough for human-edited docs and
+  Claude/Codex handle them reliably
+- **Inline citations** travel with the artifact — copy the file
+  elsewhere and the lineage moves with it
+- **No metadata sidecar** to keep in sync (citations live in the
+  artifact, not in state.json)
+- **Engine doesn't enforce** because static enforcement is brittle
+  (section renames break it, the agent always knows context better than
+  a linter could). The convention is in the prompt, in the doc, and in
+  the execution contract — that is sufficient
+
+### What Happens When References Break
+
+Three failure modes and the desired response:
+
+| Failure | Detection | Response |
+|---|---|---|
+| Cited file no longer exists | Reader agent gets file-not-found | Agent flags it in its output: "cannot verify <ref>"; step proceeds but the gap is visible |
+| Cited section removed (file renamed sections) | Reader agent finds the file but not the anchor | Same — flag and proceed |
+| Cited section semantically changed but anchor stable | Reader agent reads new content and sees mismatch with what it was asked to produce | Agent surfaces the contradiction in its output and (if `human_approval` is downstream) the reviewer catches it |
+
+None of these are silent failures. The point of the convention is to
+keep them surfaceable rather than buried.
+
+### Tradeoff with §14
+
+§14 says prompt-level references shouldn't be in `inputs:` because they
+shouldn't auto-invalidate the step. §16 says those same files should be
+cited inline. **Both stand.** A reference can be:
+
+- Mentioned in the prompt as an *available* upstream file (§14)
+- Cited inline in the agent's output to track lineage (§16)
+- NOT in the `inputs:` map (no automatic staleness — agent will catch
+  drift on next downstream read via §16 verification, not via hash
+  comparison)
+
+The two mechanisms cover different failure modes: §14 keeps the
+staleness graph minimal; §16 keeps the semantic lineage intact.
+
+### Example (End-to-End)
+
+`design.md` (step 1) defines:
+
+```markdown
+## Auth Flow
+
+Users log in with email + password. We never store passwords; we use a
+one-way bcrypt hash with cost factor 12.
+```
+
+`hld.md` (step 3) implements:
+
+```markdown
+## Service Boundaries
+
+<!-- ref: design.md#auth-flow -->
+
+The AuthService owns:
+- Password hashing (bcrypt cost 12, per design)
+- Session token issuance
+```
+
+`lld.md` (step 5) elaborates:
+
+```markdown
+## AuthService class schema
+
+<!-- ref: hld.md#service-boundaries -->
+<!-- ref: design.md#auth-flow -->
+
+class AuthService {
+  hash(password: string): Promise<string>  // bcrypt, cost=12
+  verify(password: string, hash: string): Promise<boolean>
+  ...
+}
+```
+
+When the step-7 implementation agent reads `lld.md`, it sees both refs.
+It opens `design.md#auth-flow`, confirms the bcrypt-12 requirement, and
+implements accordingly. If by step 7 someone has edited `design.md` to
+specify bcrypt cost 14, the step-7 agent reads the *new* design.md,
+notices the LLD says cost 12 but design says cost 14, and surfaces the
+contradiction rather than silently picking one.
 
 ---
 
@@ -1092,3 +1249,4 @@ the CLI from Phase 2; just needs documentation and a real test.
 - **Stale**: a completed step whose tracked inputs have changed since it last ran
 - **Cascade**: re-running downstream steps after an upstream step changes
 - **Sub-workflow** (Phase 5+): a step whose execution is itself a workflow; not in v1
+- **Reference / citation**: an inline `<!-- ref: <file>#<section> -->` marker in an artifact, pointing to the upstream source that informed that section (see §16)
