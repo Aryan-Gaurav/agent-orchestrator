@@ -1,7 +1,10 @@
 export type WorkflowErrorCode =
   | "WF_VALIDATION"
   | "WF_CYCLE"
-  | "WF_STEP_NOT_FOUND";
+  | "WF_STEP_NOT_FOUND"
+  | "WF_MISSING_INPUTS"
+  | "WF_TEMPLATE"
+  | "WF_SELECTOR_CYCLE";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -49,6 +52,51 @@ export class StepNotFoundError extends WorkflowError {
     super("WF_STEP_NOT_FOUND", `Step not found: ${stepId}`, options);
     this.name = "StepNotFoundError";
     this.stepId = stepId;
+  }
+}
+
+export class MissingInputsError extends WorkflowError {
+  readonly stepId: string;
+  readonly missing: string[];
+
+  constructor(stepId: string, missing: string[], options?: ErrorOptions) {
+    const list = missing.map((p) => `  - ${p}`).join("\n");
+    super(
+      "WF_MISSING_INPUTS",
+      `Cannot run step "${stepId}" with --only: required input file(s) missing on disk:\n${list}\nHint: run with --through ${stepId} to produce them, or use --input <name>=<path> to inject an external file.`,
+      options,
+    );
+    this.name = "MissingInputsError";
+    this.stepId = stepId;
+    this.missing = missing;
+  }
+}
+
+export class TemplateError extends WorkflowError {
+  readonly placeholder: string;
+
+  constructor(placeholder: string, options?: ErrorOptions) {
+    super(
+      "WF_TEMPLATE",
+      `Unknown template placeholder ${placeholder}. Only {{inputs.<name>}} and {{outputs.<name>}} are supported.`,
+      options,
+    );
+    this.name = "TemplateError";
+    this.placeholder = placeholder;
+  }
+}
+
+export class CycleInSelectorResolutionError extends WorkflowError {
+  readonly cycle: string[];
+
+  constructor(cycle: string[], options?: ErrorOptions) {
+    super(
+      "WF_SELECTOR_CYCLE",
+      `Cycle detected during selector resolution: ${cycle.join(" -> ")}`,
+      options,
+    );
+    this.name = "CycleInSelectorResolutionError";
+    this.cycle = cycle;
   }
 }
 
