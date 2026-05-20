@@ -1,0 +1,29 @@
+id: hello-world
+description: Minimal 2-step workflow used by the integration tests and as a demo
+artifacts_dir: ./workflow-artifacts
+project_id: hello-world-project
+
+inputs:
+  - name: feature
+    path: ./feature.md
+
+steps:
+  - id: write_hello
+    type: agent
+    agent: claude-code
+    prompt: |
+      Read the feature description at {{inputs.feature}}.
+      Write a one-paragraph greeting acknowledging it.
+      Save it to {{outputs.hello}}.
+    outputs:
+      hello: hello.md
+    timeout_minutes: 10
+
+  - id: hello_review
+    type: human_approval
+    depends_on: [write_hello]
+    message: |
+      Review workflow-artifacts/hello.md.
+      Approve to finish, reject with feedback to regenerate.
+    on_reject: write_hello
+    max_revisions: 3

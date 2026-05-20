@@ -1,6 +1,4 @@
-// Public entry point for @aoagents/ao-workflow. Phase 0 exposes only the
-// schema, types, and error classes — the engine, CLI, and runtime modules
-// arrive in later phases.
+// Public entry point for @aoagents/ao-workflow.
 
 export { parseWorkflowDefinition } from "./schema.js";
 export {
@@ -19,10 +17,28 @@ export {
   updateStep,
 } from "./state-store.js";
 export {
+  decideGate,
+  enterGate,
+  readFeedback,
+  readPendingGates,
+  type GateDecision,
+  type PendingGate,
+} from "./approvals.js";
+export { runWorkflow, type RunResult, type RunWorkflowOptions } from "./engine.js";
+export * as log from "./logger.js";
+export {
   ArtifactStoreError,
+  CompletionTimeoutError,
+  DefinitionNotFoundError,
+  GateNotAwaitingError,
   LockTimeoutError,
+  MissingInputsError,
+  RevisionLimitExceededError,
+  RunNotFoundError,
   StateStoreError,
   StepNotFoundError,
+  StepTypeMismatchError,
+  TemplateError,
   WorkflowCycleError,
   WorkflowError,
   WorkflowValidationError,

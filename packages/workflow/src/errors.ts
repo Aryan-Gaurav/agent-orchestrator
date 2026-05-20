@@ -10,7 +10,12 @@ export type WorkflowErrorCode =
   | "WF_ARTIFACT_STORE"
   | "WF_AO_CONTEXT"
   | "WF_COMPLETION_TIMEOUT"
-  | "WF_SESSION_FAILED";
+  | "WF_SESSION_FAILED"
+  | "WF_GATE_NOT_AWAITING"
+  | "WF_REVISION_LIMIT"
+  | "WF_RUN_NOT_FOUND"
+  | "WF_DEFINITION_NOT_FOUND"
+  | "WF_STEP_TYPE_MISMATCH";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -138,6 +143,80 @@ export class AoContextError extends WorkflowError {
   constructor(message: string, options?: ErrorOptions) {
     super("WF_AO_CONTEXT", message, options);
     this.name = "AoContextError";
+  }
+}
+
+export class GateNotAwaitingError extends WorkflowError {
+  readonly stepId: string;
+  readonly currentStatus: string;
+
+  constructor(stepId: string, currentStatus: string, options?: ErrorOptions) {
+    super(
+      "WF_GATE_NOT_AWAITING",
+      `Approval step "${stepId}" is not awaiting decision (status: ${currentStatus})`,
+      options,
+    );
+    this.name = "GateNotAwaitingError";
+    this.stepId = stepId;
+    this.currentStatus = currentStatus;
+  }
+}
+
+export class RevisionLimitExceededError extends WorkflowError {
+  readonly stepId: string;
+  readonly limit: number;
+
+  constructor(stepId: string, limit: number, options?: ErrorOptions) {
+    super(
+      "WF_REVISION_LIMIT",
+      `Step "${stepId}" exceeded max_revisions limit (${limit})`,
+      options,
+    );
+    this.name = "RevisionLimitExceededError";
+    this.stepId = stepId;
+    this.limit = limit;
+  }
+}
+
+export class RunNotFoundError extends WorkflowError {
+  readonly runId: string;
+
+  constructor(runId: string, options?: ErrorOptions) {
+    super("WF_RUN_NOT_FOUND", `Run not found: ${runId}`, options);
+    this.name = "RunNotFoundError";
+    this.runId = runId;
+  }
+}
+
+export class DefinitionNotFoundError extends WorkflowError {
+  readonly path: string;
+
+  constructor(path: string, options?: ErrorOptions) {
+    super(
+      "WF_DEFINITION_NOT_FOUND",
+      `Workflow definition file not found at ${path}`,
+      options,
+    );
+    this.name = "DefinitionNotFoundError";
+    this.path = path;
+  }
+}
+
+export class StepTypeMismatchError extends WorkflowError {
+  readonly stepId: string;
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(stepId: string, expected: string, actual: string, options?: ErrorOptions) {
+    super(
+      "WF_STEP_TYPE_MISMATCH",
+      `Step "${stepId}" has type "${actual}" but expected "${expected}"`,
+      options,
+    );
+    this.name = "StepTypeMismatchError";
+    this.stepId = stepId;
+    this.expected = expected;
+    this.actual = actual;
   }
 }
 
