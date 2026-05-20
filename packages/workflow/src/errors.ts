@@ -7,7 +7,10 @@ export type WorkflowErrorCode =
   | "WF_SELECTOR_CYCLE"
   | "WF_STATE_STORE"
   | "WF_LOCK_TIMEOUT"
-  | "WF_ARTIFACT_STORE";
+  | "WF_ARTIFACT_STORE"
+  | "WF_AO_CONTEXT"
+  | "WF_COMPLETION_TIMEOUT"
+  | "WF_SESSION_FAILED";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -128,6 +131,29 @@ export class ArtifactStoreError extends WorkflowError {
   constructor(message: string, options?: ErrorOptions) {
     super("WF_ARTIFACT_STORE", message, options);
     this.name = "ArtifactStoreError";
+  }
+}
+
+export class AoContextError extends WorkflowError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("WF_AO_CONTEXT", message, options);
+    this.name = "AoContextError";
+  }
+}
+
+export class CompletionTimeoutError extends WorkflowError {
+  readonly sessionId: string;
+  readonly elapsedMs: number;
+
+  constructor(sessionId: string, elapsedMs: number, options?: ErrorOptions) {
+    super(
+      "WF_COMPLETION_TIMEOUT",
+      `Session ${sessionId} did not complete within ${elapsedMs}ms`,
+      options,
+    );
+    this.name = "CompletionTimeoutError";
+    this.sessionId = sessionId;
+    this.elapsedMs = elapsedMs;
   }
 }
 
