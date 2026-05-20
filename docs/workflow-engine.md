@@ -1375,6 +1375,32 @@ The engine reads this on `aow show <run-id> --hops` to surface a
 verification trail per step. Helps a human reviewer see what the agent
 actually checked.
 
+**Hop-depth warning.** On every invocation, the resolver counts hops in
+`.ao/ref-hops.jsonl` filtered by the current `step_id`. If the count
+exceeds 4 for this step, the response includes a `warnings` array:
+
+```json
+{
+  "ok": true,
+  "ref": "...",
+  "artifact_relative_path": "...",
+  "section_heading": "...",
+  "section_content": "...",
+  "outgoing_refs": [],
+  "claim_match": null,
+  "warnings": ["hop_depth_4"]
+}
+```
+
+The agent sees the warning in real time and is instructed (via the
+footer in §17.3) to stop traversing further unless absolutely necessary
+and to flag the depth in an `## Open question` block. The linter (§17.2)
+reads the same JSONL post-step and attaches a soft warning to the step
+state, surfaced on `aow show`. Both signal the same underlying issue: a
+single step probing deeply into upstream is a smell — likely the
+workflow is too deep, or the step is doing too much, or the upstream
+docs aren't structured around the right boundaries.
+
 ### 17.2 Post-Step Citation Linter
 
 After an agent step completes (outputs exist, activity idle), and BEFORE
@@ -1416,6 +1442,10 @@ expected, what was found).
 - Output has **> (N × major_sections)** citations where N=3 → warn
   (over-citation, likely noise)
 - A single output section (`### heading` block) has > 3 citations → warn
+- Step's hop log shows **> 4 hops** for any single invocation chain →
+  warn (`hop_depth_exceeded`). Indicates the step is probing too deeply
+  into upstream context; consider splitting the step or restructuring
+  the upstream docs
 
 Warnings don't fail the step. They're attached to the step state and
 surfaced on `aow show`. Pattern over time tells the prompt author whether
@@ -1475,6 +1505,19 @@ READING — when you encounter a citation:
     (e.g., hld.md cites design.md and you need the original source),
     make additional hops. The resolver works the same at every step.
 
+  - HOP-DEPTH LIMIT — if the resolver response includes
+    `warnings: ["hop_depth_4"]`, you have followed the chain more than
+    4 levels deep on this step. STOP traversing further unless the next
+    hop is genuinely required to complete your task. Add an
+    "## Open question" block to your output noting:
+        - How many hops you made
+        - What you were trying to verify
+        - Whether you reached a definitive answer
+    Deep traversal usually means the workflow is too long, the step is
+    doing too much, or the upstream docs aren't structured around the
+    right boundaries — surfacing the depth lets a human reviewer decide
+    whether to restructure.
+
 PROPAGATION — if your output makes a decision that depends on a fact
 inherited from upstream, copy the citation forward (one hop) onto your
 own section. Do not re-cite the upstream's upstream.
@@ -1505,6 +1548,7 @@ handles the common case.
 | Cited section was edited externally, claim no longer matches | Same as above on next run that consumes the cited section | Same — step fails, surfaces drift |
 | Agent reads upstream and finds genuine contradiction | Agent flags in output with `## Open question` block | Reviewer catches at the next human_approval gate |
 | Agent fabricates a citation (file looks plausible but claim is invented) | Linter claim_mismatch check | Step fails, re-runs with feedback |
+| Step traverses > 4 hops in citation chain | Resolver emits `hop_depth_4` warning at runtime; linter aggregates post-step | Soft warning attached; agent prompted to add `## Open question` block; reviewer decides whether step / workflow needs restructuring |
 
 The combination of structural enforcement (linter) and prompt-level
 contract (resolver + decision rules) covers all known drift modes
