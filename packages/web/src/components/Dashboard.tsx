@@ -24,10 +24,11 @@ import { ToastProvider, useToast } from "./Toast";
 import { ConnectionBar } from "./ConnectionBar";
 import { UpdateBanner } from "./UpdateBanner";
 import { CopyDebugBundleButton } from "./CopyDebugBundleButton";
+import { DashboardNotificationButton } from "./DashboardNotificationButton";
 import { SidebarContext, useSidebarContext } from "./workspace/SidebarContext";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { isOrchestratorSession } from "@aoagents/ao-core/types";
-import { projectDashboardPath, projectSessionPath } from "@/lib/routes";
+import { projectDashboardPath, projectReviewPath, projectSessionPath } from "@/lib/routes";
 import { BottomSheet } from "./BottomSheet";
 
 interface DashboardProps {
@@ -244,6 +245,8 @@ function DashboardInner({
 
   sessionsRef.current = sessions;
   const allProjectsView = projects.length > 1 && projectId === undefined;
+  const codingHref = projectId ? projectDashboardPath(projectId) : "/?project=all";
+  const reviewHref = projectReviewPath(projectId);
   const currentProjectOrchestrator = useMemo(
     () =>
       projectId
@@ -463,6 +466,32 @@ function DashboardInner({
     [showToast],
   );
 
+  const handleRequestReview = useCallback(
+    async (sessionId: string) => {
+      try {
+        const res = await fetch("/api/reviews", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId }),
+        });
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (!res.ok) {
+          throw new Error(data?.error ?? "Failed to request review");
+        }
+
+        const session = sessionsRef.current.find((entry) => entry.id === sessionId);
+        showToast("Review run requested", "success");
+        routerRef.current.push(projectReviewPath(session?.projectId ?? projectId));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to request review";
+        console.error(`Failed to request review for ${sessionId}:`, error);
+        showToast(`Review failed: ${message}`, "error");
+        throw error;
+      }
+    },
+    [projectId, showToast],
+  );
+
   const handleSpawnOrchestrator = async (project: ProjectInfo) => {
     setSpawningProjectIds((current) =>
       current.includes(project.id) ? current : [...current, project.id],
@@ -589,6 +618,18 @@ function DashboardInner({
               <div className="topbar-project-pills-group">
                 <div className="topbar-project-line">
                   <span className="dashboard-app-header__project">{headerProjectLabel}</span>
+                  <nav className="workspace-mode-switch" aria-label="Workspace mode">
+                    <Link
+                      href={codingHref}
+                      className="workspace-mode-switch__item workspace-mode-switch__item--active"
+                      aria-current="page"
+                    >
+                      Coding
+                    </Link>
+                    <Link href={reviewHref} className="workspace-mode-switch__item">
+                      Reviews
+                    </Link>
+                  </nav>
                 </div>
                 {!allProjectsView && projectSessions.length > 0 ? (
                   <div className="topbar-session-pills">
@@ -624,6 +665,7 @@ function DashboardInner({
           <div className="dashboard-app-header__spacer" />
           <div className="dashboard-app-header__actions">
             {showDebugBundleButton ? <CopyDebugBundleButton projectId={projectId} /> : null}
+            <DashboardNotificationButton />
             {!allProjectsView && orchestratorHref ? (
               <Link
                 href={orchestratorHref}
@@ -676,7 +718,7 @@ function DashboardInner({
           </div>
         </header>
 
-        <main className="dashboard-main flex-1 min-h-0 overflow-hidden">
+        <main className="dashboard-main flex flex-col flex-1 min-h-0 overflow-hidden">
           <DynamicFavicon attentionLevels={attentionLevels} projectName={projectName} />
           <div className="dashboard-main__subhead">
             <h1 className="dashboard-main__title">Dashboard</h1>
@@ -751,6 +793,7 @@ function DashboardInner({
                       onKill={handleKill}
                       onMerge={handleMerge}
                       onRestore={handleRestore}
+                      onReview={handleRequestReview}
                       compactMobile={isMobile}
                       collapsed={isMobile && collapsedZones.has(level)}
                       onToggle={isMobile ? handleZoneToggle : undefined}
