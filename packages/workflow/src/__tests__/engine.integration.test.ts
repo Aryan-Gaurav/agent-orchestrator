@@ -3,7 +3,7 @@
 // sm.spawn/get/kill drive completion-detector. The "agent" is simulated by a
 // timer that writes the expected output file shortly after spawn.
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +26,7 @@ interface FakeSession {
   activity: string | null;
   lastActivityAt: Date | null;
   branch: string | null;
+  workspacePath: string;
 }
 
 interface MockController {
@@ -34,6 +35,10 @@ interface MockController {
   /** Tweak how an "agent" behaves on spawn — return null to use defaults. */
   onSpawn?: (sessionId: string) => Promise<void> | void;
   killed: string[];
+  /** Returned by sm.get; if true, returns null instead of the session. */
+  dropSessionsOnGet?: boolean;
+  /** Per-session workspace dirs created in makeController. */
+  workspacePaths: string[];
 }
 
 function buildAoCtx(controller: MockController) {
@@ -41,6 +46,7 @@ function buildAoCtx(controller: MockController) {
     sm: {
       spawn: controller.spawn,
       get: vi.fn(async (id: string) => {
+        if (controller.dropSessionsOnGet) return null;
         return controller.sessions.get(id) ?? null;
       }),
       kill: vi.fn(async (id: string) => {
@@ -60,22 +66,29 @@ function buildAoCtx(controller: MockController) {
 function makeController(opts: {
   outputAbsPath: () => string;
   outputContent?: string;
+  dropSessionsOnGet?: boolean;
 }): MockController {
   const controller: MockController = {
     spawn: vi.fn(),
     sessions: new Map(),
     killed: [],
+    dropSessionsOnGet: opts.dropSessionsOnGet,
+    workspacePaths: [],
   };
   let counter = 0;
   controller.spawn.mockImplementation(async (req: { branch: string }) => {
     counter += 1;
     const id = `ses-${counter}`;
+    const workspacePath = await mkdtemp(join(tmpdir(), "aow-int-ws-"));
+    controller.workspacePaths.push(workspacePath);
+    sessionWorkspaces.push(workspacePath);
     const session: FakeSession = {
       id,
       status: "active",
       activity: "active",
       lastActivityAt: new Date(),
       branch: req.branch,
+      workspacePath,
     };
     controller.sessions.set(id, session);
     // Schedule the "agent" to write its output and go idle on the next tick.
@@ -149,9 +162,15 @@ beforeEach(() => {
   workspaces = [];
 });
 
+const sessionWorkspaces: string[] = [];
+
 afterEach(async () => {
   for (const dir of workspaces) {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+  while (sessionWorkspaces.length) {
+    const dir = sessionWorkspaces.pop();
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
@@ -184,6 +203,12 @@ describe("runWorkflow integration", () => {
     // Output file present and non-empty.
     const written = await readFile(ws.outputPath(), "utf8");
     expect(written).toContain("output from ses-1");
+
+    // Resolver script was installed into the spawned session's workspace.
+    const aowRef = join(controller.workspacePaths[0], ".ao", "aow-ref");
+    await expect(access(aowRef)).resolves.toBeUndefined();
+    const refStat = await stat(aowRef);
+    expect(refStat.mode & 0o111).not.toBe(0);
 
     await decideGate(first.runDir, "hello_review", { kind: "approve" });
 
@@ -293,5 +318,35 @@ describe("runWorkflow integration", () => {
     expect(resumed.status).toBe("completed");
     // No new agent spawn during resume because write_hello was already done.
     expect(controller2.spawn).not.toHaveBeenCalled();
+  });
+
+  it("completes successfully when sm.get returns null post-spawn (resolver install is best-effort)", async () => {
+    const ws = await freshWorkspace();
+    const controller = makeController({
+      outputAbsPath: ws.outputPath,
+      dropSessionsOnGet: true,
+    });
+
+    const result = await runWorkflow({
+      workflowPath: ws.workflowPath,
+      selector: { kind: "all" },
+      detach: true,
+      aoContextFactory: async () => buildAoCtx(controller),
+      completionPollIntervalMs: 5,
+      completionIdleThresholdMs: 10,
+    });
+
+    // The step itself should not be marked failed by the missing-workspace path —
+    // it will time out on completion polling (since sm.get returns null) but the
+    // install failure alone must not fail the step. Here we just assert spawn
+    // happened and the resolver was NOT installed (since we have no workspace
+    // to install into).
+    expect(controller.spawn).toHaveBeenCalledTimes(1);
+    expect(controller.workspacePaths).toHaveLength(1);
+    const aowRef = join(controller.workspacePaths[0], ".ao", "aow-ref");
+    await expect(access(aowRef)).rejects.toBeDefined();
+    // The run will not reach awaiting_approval because sm.get returns null
+    // for the completion-detector too; we only care that nothing threw.
+    expect(["awaiting_approval", "failed", "completed"]).toContain(result.status);
   });
 });

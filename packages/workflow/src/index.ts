@@ -25,6 +25,11 @@ export {
   type PendingGate,
 } from "./approvals.js";
 export { runWorkflow, type RunResult, type RunWorkflowOptions } from "./engine.js";
+export { getSessionWorkspacePath } from "./ao-client.js";
+export {
+  getBundledResolverScriptPath,
+  installResolverScript,
+} from "./engine/workspace-setup.js";
 export * as log from "./logger.js";
 export { resolveCitation } from "./resolver/script.js";
 export {
@@ -48,6 +53,7 @@ export {
   WorkflowCycleError,
   WorkflowError,
   WorkflowValidationError,
+  WorkspaceSetupError,
   type ValidationIssue,
   type WorkflowErrorCode,
 } from "./errors.js";
