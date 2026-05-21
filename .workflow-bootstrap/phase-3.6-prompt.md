@@ -1,15 +1,15 @@
-# Phase 3.5.1 — `aow` Achieves Parity With `ao` UX
+# Phase 3.6 — Standalone `aow` (Local Only, Not Published)
 
 ## Why
 
-`aow` currently only works inside the agent-orchestrator monorepo checkout. To match `ao`'s UX (`npm install -g @aoagents/ao` → run from any repo), four things have to change:
+`aow` currently only works inside the agent-orchestrator monorepo checkout. We want it to run from any local repo using the AO version already in this monorepo — **no npm publish yet**. Four things have to change:
 
-1. `aow` must be **globally installable** as its own npm package.
-2. The published package must **carry plugin deps** so plugins resolve from its own `node_modules`.
+1. `aow` must be **packaged as its own sub-package** (`packages/aow/`) so it has a clean bin entry that resolves plugins from its own `node_modules`. Local-only for now — tested via `node packages/aow/bin/aow.js …` from any cwd. Publish config is set up so a human can `pnpm publish` later, but this phase does not publish.
+2. The package must **carry plugin deps** (via `workspace:*`) so plugins resolve from its own `node_modules` instead of failing with "Runtime plugin 'tmux' not found".
 3. `aow run` in a fresh repo must **auto-create** a minimal `agent-orchestrator.yaml` (the way `ao start` does).
 4. `aow run` must **auto-start the AO daemon** if it isn't already running (or, if that's too invasive, fail with a precise instructional error).
 
-This phase delivers all four.
+This phase delivers all four. Phase 3.7 dogfoods it on a real workflow (URL shortener).
 
 ## Required Reading
 
