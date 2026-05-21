@@ -37,7 +37,15 @@ export {
   resolverResponseSchema,
 } from "./resolver/schema.js";
 export {
+  lintStepCitations,
+  type CitationFinding,
+  type CitationFindingCode,
+  type LintInputs,
+  type LintReport,
+} from "./citation-linter.js";
+export {
   ArtifactStoreError,
+  CitationError,
   CompletionTimeoutError,
   DefinitionNotFoundError,
   GateNotAwaitingError,

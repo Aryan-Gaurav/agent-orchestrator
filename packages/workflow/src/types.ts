@@ -135,6 +135,7 @@ export interface StepState {
   history?: AttemptRecord[];
   awaiting_since?: string;
   failure_reason?: string;
+  warnings?: string[];
 }
 
 export interface RunState {
