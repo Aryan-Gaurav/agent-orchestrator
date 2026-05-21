@@ -7,3 +7,4 @@
 [2026-05-21T06:41:09Z] phase=3.3 event=pr_opened session=wf-10 pr=#9
 [2026-05-21T11:38:35Z] phase=3.5.1 event=blocked session= reason=ao_spawn_refused — supervisor pid 11334 started with configPath=/Users/aryangaurav/agent-orchestrator/agent-orchestrator.yaml (file missing) and projects=[]; global config has no ao-workflow project, only aow-test-url-shortener
 [2026-05-21T11:58:16Z] phase=3.6 event=spawned session=wf-14 pr= note=human-authorized override of brief's no-3.6 rule; supervisor pid 16096 now bound to ao-workflow; 3.5.1 prompt renamed to 3.6 at upstream commit 4e05ecfc
+[2026-05-21T12:13:35Z] phase=3.6 event=merged sha=9105dd07 session=wf-14 pr=#13
