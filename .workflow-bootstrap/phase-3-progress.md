@@ -6,3 +6,4 @@
 [2026-05-21T06:38:40Z] phase=3.3 event=spawned session=wf-10 pr= note=single-session model — wf-10 will sequence 3.3→3.4→3.5 across three PRs per .workflow-bootstrap/phase-3-remaining-prompt.md
 [2026-05-21T06:41:09Z] phase=3.3 event=pr_opened session=wf-10 pr=#9
 [2026-05-21T11:38:35Z] phase=3.5.1 event=blocked session= reason=ao_spawn_refused — supervisor pid 11334 started with configPath=/Users/aryangaurav/agent-orchestrator/agent-orchestrator.yaml (file missing) and projects=[]; global config has no ao-workflow project, only aow-test-url-shortener
+[2026-05-21T11:58:16Z] phase=3.6 event=spawned session=wf-14 pr= note=human-authorized override of brief's no-3.6 rule; supervisor pid 16096 now bound to ao-workflow; 3.5.1 prompt renamed to 3.6 at upstream commit 4e05ecfc
