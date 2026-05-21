@@ -15,7 +15,8 @@ export type WorkflowErrorCode =
   | "WF_REVISION_LIMIT"
   | "WF_RUN_NOT_FOUND"
   | "WF_DEFINITION_NOT_FOUND"
-  | "WF_STEP_TYPE_MISMATCH";
+  | "WF_STEP_TYPE_MISMATCH"
+  | "WF_RESOLVER";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -242,4 +243,11 @@ function formatIssues(issues: ValidationIssue[]): string {
   }
   const lines = issues.map((issue) => `  - ${issue.path}: ${issue.message}`);
   return `Workflow validation failed:\n${lines.join("\n")}`;
+}
+
+export class ResolverError extends WorkflowError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("WF_RESOLVER", message, options);
+    this.name = "ResolverError";
+  }
 }

@@ -26,6 +26,11 @@ export {
 } from "./approvals.js";
 export { runWorkflow, type RunResult, type RunWorkflowOptions } from "./engine.js";
 export * as log from "./logger.js";
+export { resolveCitation } from "./resolver/script.js";
+export {
+  parseResolverResponse,
+  resolverResponseSchema,
+} from "./resolver/schema.js";
 export {
   ArtifactStoreError,
   CompletionTimeoutError,
@@ -33,6 +38,7 @@ export {
   GateNotAwaitingError,
   LockTimeoutError,
   MissingInputsError,
+  ResolverError,
   RevisionLimitExceededError,
   RunNotFoundError,
   StateStoreError,
@@ -51,6 +57,12 @@ export type {
   Artifact,
   ArtifactRef,
   AttemptRecord,
+  Citation,
+  ClaimMatch,
+  HopRecord,
+  ResolverErrorKind,
+  ResolverMatchKind,
+  ResolverResponse,
   RunID,
   RunState,
   Selector,
