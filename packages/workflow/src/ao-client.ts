@@ -152,3 +152,17 @@ export async function killSession(
 ): Promise<void> {
   await ctx.sm.kill(sessionId, reason ? { reason } : undefined);
 }
+
+/**
+ * Look up a session's filesystem workspace path. Returns null if the
+ * session no longer exists. Used by the workflow engine to drop the
+ * resolver script into the agent's worktree post-spawn.
+ */
+export async function getSessionWorkspacePath(
+  ctx: AoContext,
+  sessionId: SessionId,
+): Promise<string | null> {
+  const session = await ctx.sm.get(sessionId);
+  if (!session) return null;
+  return session.workspacePath ?? null;
+}

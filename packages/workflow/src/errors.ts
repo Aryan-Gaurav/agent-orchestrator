@@ -16,7 +16,8 @@ export type WorkflowErrorCode =
   | "WF_RUN_NOT_FOUND"
   | "WF_DEFINITION_NOT_FOUND"
   | "WF_STEP_TYPE_MISMATCH"
-  | "WF_RESOLVER";
+  | "WF_RESOLVER"
+  | "WF_WORKSPACE_SETUP";
 
 export class WorkflowError extends Error {
   readonly code: WorkflowErrorCode;
@@ -249,5 +250,12 @@ export class ResolverError extends WorkflowError {
   constructor(message: string, options?: ErrorOptions) {
     super("WF_RESOLVER", message, options);
     this.name = "ResolverError";
+  }
+}
+
+export class WorkspaceSetupError extends WorkflowError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("WF_WORKSPACE_SETUP", message, options);
+    this.name = "WorkspaceSetupError";
   }
 }

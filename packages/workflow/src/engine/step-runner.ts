@@ -6,7 +6,8 @@
 import { isAbsolute, join, resolve } from "node:path";
 
 import type { AoContext } from "../ao-client.js";
-import { killSession, spawnAgentSession } from "../ao-client.js";
+import { getSessionWorkspacePath, killSession, spawnAgentSession } from "../ao-client.js";
+import { installResolverScript } from "./workspace-setup.js";
 import { hashFile } from "../artifact-store.js";
 import { waitForStepCompletion } from "../completion-detector.js";
 import { enterGate, readFeedback } from "../approvals.js";
@@ -94,6 +95,18 @@ export async function runAgentStep(
     const reason = err instanceof Error ? err.message : String(err);
     log.error(`[${step.id}] spawn failed: ${reason}`);
     return { kind: "failed", reason: `spawn_failed: ${reason}` };
+  }
+
+  try {
+    const workspacePath = await getSessionWorkspacePath(ctx.aoCtx, sessionId);
+    if (workspacePath) {
+      await installResolverScript(workspacePath);
+    } else {
+      log.warn(`[${step.id}] could not locate workspace for session ${sessionId}; resolver script not installed`);
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log.warn(`[${step.id}] failed to install resolver script: ${reason}`);
   }
 
   const timeoutMs = (step.timeout_minutes ?? DEFAULT_TIMEOUT_MINUTES) * 60_000;
