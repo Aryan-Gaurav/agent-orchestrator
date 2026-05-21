@@ -138,7 +138,7 @@ In `runAgentStep`, AFTER outputs are verified (existence + hash) and BEFORE retu
 
 Do not change `runApprovalStep`. Do not change `setupWorkspace`, the spawn path, or any timing.
 
-**Hard constraint:** keep `step-runner.ts` ≤ 400 LOC after changes (soft cap — flag in PR body under `## LOC cap notice` if exceeded). Current is 280; you have headroom but stay disciplined. If it grows past 380, extract the linter wiring into a tiny `engine/lint-step.ts`.
+**Hard constraint:** keep `step-runner.ts` ≤ 400 LOC after changes. Current is 280; you have headroom but stay disciplined. If it grows past 380, extract the linter wiring into a tiny `engine/lint-step.ts`.
 
 ### 4. `packages/workflow/src/errors.ts` (MODIFY)
 
@@ -162,7 +162,7 @@ Export `lintStepCitations`, `CitationFinding`, `CitationFindingCode`, `LintInput
 - Modify ONLY: the 5 files listed above plus the new fixtures directory. Nothing else.
 - Strict TS, no `any`. Use `unknown` + narrowing.
 - No new top-level dependencies.
-- Per-file LOC cap: **400 (soft cap).** Aim to stay under it by splitting helpers. If you genuinely need to exceed it for a single file (cohesion > splitting), you MAY ship over 400, but you MUST flag it in the PR body under a `## LOC cap notice` heading: which file, final LOC count, why splitting hurt cohesion, what approach you chose. The human will review the approach before merging.
+- Per-file LOC cap: 400. The linter itself targets ≤ 300.
 - Subprocess timeout 15s, no exceptions.
 - Density warning thresholds are constants at the top of `citation-linter.ts` (e.g., `MAX_CITATIONS_PER_SECTION = 3`, `MAX_CITATION_DENSITY_MULTIPLIER = 3`, `HOP_DEPTH_LIMIT = 4`). Named, not magic numbers.
 
