@@ -68,6 +68,57 @@ export interface ArtifactRef {
   path: string;
 }
 
+export type ResolverErrorKind =
+  | "file_not_found"
+  | "section_not_found"
+  | "claim_mismatch"
+  | "malformed_ref"
+  | "outside_artifacts_dir";
+
+export type ResolverMatchKind =
+  | "exact_substring"
+  | "normalized_substring"
+  | "token_overlap";
+
+export interface ClaimMatch {
+  found: boolean;
+  match_kind: ResolverMatchKind | null;
+  confidence: number;
+}
+
+export interface Citation {
+  file: string;
+  section: string | null;
+  claim: string | null;
+}
+
+export interface HopRecord {
+  ts: string;
+  step_id: string;
+  ref: string;
+  outcome: "ok" | "error";
+  match_kind: ResolverMatchKind | null;
+}
+
+export type ResolverResponse =
+  | {
+      ok: true;
+      ref: string;
+      artifact_relative_path: string;
+      section_heading: string | null;
+      section_content: string;
+      outgoing_refs: Citation[];
+      claim_match: ClaimMatch | null;
+      warnings?: string[];
+    }
+  | {
+      ok: false;
+      ref: string;
+      error: ResolverErrorKind;
+      message: string;
+      available_sections?: string[];
+    };
+
 export interface AttemptRecord {
   session_id: string;
   branch: string;
