@@ -9,6 +9,8 @@ import { join, resolve } from "node:path";
 import { Command } from "commander";
 
 import { decideGate, readPendingGates } from "./approvals.js";
+import { createAoContext, type AoContext } from "./ao-client.js";
+import { emitHopsForRun } from "./cli/render-hops.js";
 import { runWorkflow } from "./engine.js";
 import { WorkflowError } from "./errors.js";
 import * as log from "./logger.js";
@@ -194,17 +196,27 @@ async function rejectCmd(
 
 interface ShowOpts extends GlobalOpts {
   step?: StepID;
+  hops?: boolean;
+  aoContextFactory?: (projectId: string) => Promise<AoContext>;
 }
 
-async function showCmd(runId: RunID, opts: ShowOpts): Promise<void> {
+export async function showCmd(runId: RunID, opts: ShowOpts): Promise<void> {
   applyGlobalOpts(opts);
   const runDir = await findRunDir(runId);
   const state = await loadRunState(runDir);
+  if (opts.hops) {
+    const factory = opts.aoContextFactory ?? createAoContext;
+    const workflow = await loadWorkflow(resolveWorkflowFile(opts));
+    const aoCtx = await factory(workflow.project_id);
+    await emitHopsForRun({
+      runId, state, aoCtx, cwd: process.cwd(),
+      filterStep: opts.step, jsonMode: log.isJsonMode(), emitResult,
+    });
+    return;
+  }
   if (opts.step) {
     const step = state.steps[opts.step];
-    if (!step) {
-      throw new Error(`Step "${opts.step}" not found in run ${runId}`);
-    }
+    if (!step) throw new Error(`Step "${opts.step}" not found in run ${runId}`);
     emitResult("show-step", { run_id: runId, step_id: opts.step, ...step });
     return;
   }
@@ -260,10 +272,7 @@ async function runsCmd(opts: GlobalOpts): Promise<void> {
     return;
   }
   const summaries: Array<{
-    run_id: string;
-    workflow_id: string;
-    status: string;
-    updated_at: string;
+    run_id: string; workflow_id: string; status: string; updated_at: string;
   }> = [];
   for (const entry of entries) {
     if (!entry.startsWith("wf-")) continue;
@@ -271,10 +280,8 @@ async function runsCmd(opts: GlobalOpts): Promise<void> {
     try {
       const state = await loadRunState(runDir);
       summaries.push({
-        run_id: state.run_id,
-        workflow_id: state.workflow_id,
-        status: state.status,
-        updated_at: state.updated_at,
+        run_id: state.run_id, workflow_id: state.workflow_id,
+        status: state.status, updated_at: state.updated_at,
       });
     } catch {
       // skip corrupt run dirs
@@ -293,10 +300,7 @@ function buildProgram(): Command {
 
   program
     .option("--json", "emit machine-readable JSON output")
-    .option(
-      "--workflow-file <path>",
-      "override workflow.yaml location (default: ./workflow.yaml)",
-    );
+    .option("--workflow-file <path>", "override workflow.yaml location (default: ./workflow.yaml)");
 
   program
     .command("run [workflow]")
@@ -350,6 +354,7 @@ function buildProgram(): Command {
     .command("show <run-id>")
     .description("Show run or step details")
     .option("--step <id>", "show details for a specific step")
+    .option("--hops", "show citation hop trails per step (reads .ao/ref-hops.jsonl)")
     .action(async (runId: RunID, cmdOpts: Record<string, unknown>, command) => {
       const merged = { ...command.parent?.opts(), ...cmdOpts } as ShowOpts;
       await showCmd(runId, merged);
@@ -379,15 +384,14 @@ async function main(): Promise<void> {
   try {
     await program.parseAsync(process.argv);
   } catch (err) {
-    if (err instanceof WorkflowError) {
-      log.error(`${err.code}: ${err.message}`);
-    } else if (err instanceof Error) {
-      log.error(err.message);
-    } else {
-      log.error(String(err));
-    }
+    if (err instanceof WorkflowError) log.error(`${err.code}: ${err.message}`);
+    else if (err instanceof Error) log.error(err.message);
+    else log.error(String(err));
     process.exitCode = 1;
   }
 }
 
-void main();
+const entry = process.argv[1];
+if (entry && (import.meta.url === `file://${entry}` || import.meta.url.endsWith(entry))) {
+  void main();
+}
