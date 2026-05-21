@@ -1,0 +1,36 @@
+{
+  "name": "@aoagents/aow",
+  "version": "0.0.1",
+  "description": "Workflow engine for agent-orchestrator — global CLI wrapper",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aow": "bin/aow.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ComposioHQ/agent-orchestrator.git",
+    "directory": "packages/aow"
+  },
+  "homepage": "https://github.com/ComposioHQ/agent-orchestrator",
+  "bugs": {
+    "url": "https://github.com/ComposioHQ/agent-orchestrator/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "chmod +x bin/aow.js",
+    "prepublishOnly": "chmod +x bin/aow.js"
+  },
+  "dependencies": {
+    "@aoagents/ao-workflow": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -4,12 +4,16 @@
 // or --json is passed).
 
 import { readFile, readdir, stat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Command } from "commander";
 
 import { decideGate, readPendingGates } from "./approvals.js";
 import { createAoContext, type AoContext } from "./ao-client.js";
+import { ensureAowConfig } from "./cli/bootstrap.js";
+import { ensureDaemonRunning } from "./cli/daemon-check.js";
 import { emitHopsForRun } from "./cli/render-hops.js";
 import { runWorkflow } from "./engine.js";
 import { WorkflowError } from "./errors.js";
@@ -100,6 +104,13 @@ function emitResult(label: string, payload: Record<string, unknown>): void {
 
 async function runCmd(workflowId: string | undefined, opts: RunCommandOpts): Promise<void> {
   applyGlobalOpts(opts);
+  const bootstrap = await ensureAowConfig(process.cwd());
+  if (bootstrap.created) {
+    log.info(
+      `Created agent-orchestrator.yaml at ${bootstrap.configPath} — registered project ${bootstrap.projectId}.`,
+    );
+  }
+  await ensureDaemonRunning();
   const workflowPath = resolveWorkflowFile(opts, workflowId);
   const selector = buildSelector(opts);
   const result = await runWorkflow({
@@ -392,6 +403,19 @@ async function main(): Promise<void> {
 }
 
 const entry = process.argv[1];
-if (entry && (import.meta.url === `file://${entry}` || import.meta.url.endsWith(entry))) {
-  void main();
+if (entry) {
+  const selfUrl = fileURLToPath(import.meta.url);
+  let argvReal = entry;
+  try {
+    argvReal = realpathSync(entry);
+  } catch {
+    // entry may not exist on disk if launched via -e; fall through
+  }
+  if (
+    import.meta.url === pathToFileURL(entry).href ||
+    selfUrl === argvReal ||
+    import.meta.url.endsWith(entry)
+  ) {
+    void main();
+  }
 }

@@ -26,6 +26,12 @@ export {
 } from "./approvals.js";
 export { runWorkflow, type RunResult, type RunWorkflowOptions } from "./engine.js";
 export { getSessionWorkspacePath } from "./ao-client.js";
+export { ensureAowConfig, type BootstrapResult } from "./cli/bootstrap.js";
+export {
+  ensureDaemonRunning,
+  getDaemonStatus,
+  type DaemonStatus,
+} from "./cli/daemon-check.js";
 export {
   getBundledResolverScriptPath,
   installResolverScript,
