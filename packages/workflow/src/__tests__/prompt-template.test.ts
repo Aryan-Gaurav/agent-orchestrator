@@ -87,6 +87,19 @@ describe("appendExecutionContract", () => {
     const result = appendExecutionContract("p", {});
     expect(result).toContain("(no declared outputs)");
   });
+
+  it("appends the §17.3 citation contract footer", () => {
+    const result = appendExecutionContract("body", { x: "x.md" });
+    expect(result).toContain("=== CITATION CONTRACT ===");
+    expect(result).toContain("=== END CITATION CONTRACT ===");
+    expect(result).toContain("node .ao/aow-ref");
+    expect(result).toContain("hop_depth_4");
+    expect(result).toContain("claim_mismatch");
+    expect(result).toContain("ONE HOP BACK");
+    expect(result.indexOf("=== END CONTRACT ===")).toBeLessThan(
+      result.indexOf("=== CITATION CONTRACT ==="),
+    );
+  });
 });
 
 describe("prependFeedback", () => {
