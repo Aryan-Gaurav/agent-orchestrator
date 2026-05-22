@@ -9,3 +9,4 @@
 [2026-05-21T11:58:16Z] phase=3.6 event=spawned session=wf-14 pr= note=human-authorized override of brief's no-3.6 rule; supervisor pid 16096 now bound to ao-workflow; 3.5.1 prompt renamed to 3.6 at upstream commit 4e05ecfc
 [2026-05-21T12:13:35Z] phase=3.6 event=merged sha=9105dd07 session=wf-14 pr=#13
 [2026-05-22T02:48:05Z] phase=3.8 event=spawned session=wf-15 pr= note=human-authorized; 5 dogfood fixes per .workflow-bootstrap/phase-3.8-prompt.md + docs/aow-dogfood-findings.md
+[2026-05-22T03:13:00Z] phase=3.8 event=merged sha=6a814b44 session=wf-15 pr=#14
