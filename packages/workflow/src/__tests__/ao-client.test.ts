@@ -78,7 +78,7 @@ describe("createAoContext", () => {
     expect(ctx.config).toBe(config);
     expect(ctx.sm).toBe(sm);
     expect(ctx.lm).toBe(lm);
-    expect(registry.loadFromConfig).toHaveBeenCalledWith(config);
+    expect(registry.loadFromConfig).toHaveBeenCalledWith(config, expect.any(Function));
     expect(createSessionManager).toHaveBeenCalledWith({ config, registry });
     expect(createLifecycleManager).toHaveBeenCalledWith({
       config,
@@ -135,7 +135,12 @@ describe("spawnAgentSession", () => {
     const sm = makeMockSm({
       spawn: vi.fn().mockResolvedValueOnce({ id: "ses-42", branch: "aow-x" }),
     });
-    const ctx = { sm, lm: makeMockLm(), config: {} } as unknown as AoContext;
+    const ctx = {
+      sm,
+      lm: makeMockLm(),
+      config: {},
+      projectId: "proj-a",
+    } as unknown as AoContext;
 
     const result = await spawnAgentSession(ctx, {
       projectId: "proj-a",
@@ -157,7 +162,12 @@ describe("spawnAgentSession", () => {
     const sm = makeMockSm({
       spawn: vi.fn().mockResolvedValueOnce({ id: "ses-9", branch: null }),
     });
-    const ctx = { sm, lm: makeMockLm(), config: {} } as unknown as AoContext;
+    const ctx = {
+      sm,
+      lm: makeMockLm(),
+      config: {},
+      projectId: "p",
+    } as unknown as AoContext;
 
     const result = await spawnAgentSession(ctx, {
       projectId: "p",

@@ -19,12 +19,29 @@ import {
 
 import { AoContextError } from "./errors.js";
 
+// Resolve plugin packages from THIS file's location (packages/workflow/...),
+// not from where @aoagents/ao-core lives. ao-core's plugin-registry calls
+// dynamic import() from its own module path (packages/core/...), which has
+// no plugins in its node_modules. The workflow package's node_modules has
+// all of them via workspace symlinks. Issuing import() from here ensures
+// Node resolves the bare specifier starting at packages/workflow/.
+async function importPluginFromWorkflow(pkg: string): Promise<unknown> {
+  return import(/* @vite-ignore */ pkg);
+}
+
 export type { ActivityState, SessionId, SessionStatus, LifecycleKillReason };
 
 export interface AoContext {
   sm: SessionManager;
   lm: LifecycleManager;
   config: OrchestratorConfig;
+  /**
+   * The project id resolved against the loaded AO config (may differ from
+   * the workflow's `project_id` if bootstrap added a hash suffix). Use this
+   * whenever calling into AO core (spawn, lifecycle), not the user-typed
+   * project_id.
+   */
+  projectId: string;
 }
 
 export interface SpawnAgentOptions {
@@ -76,7 +93,21 @@ async function buildAoContext(projectId: string): Promise<AoContext> {
     );
   }
 
-  if (!config.projects[projectId]) {
+  // Resolve the project. Direct id match is the happy path. If the workflow
+  // yaml's project_id doesn't match (common after bootstrap, since AO core
+  // adds a hash suffix on registration), fall back to the sole project in
+  // the resolved config — which loadConfig() narrowed to the cwd's
+  // registered project via buildEffectiveConfigFromFlatLocalPath. The cwd
+  // is the source of truth for project identity.
+  const projectKeys = Object.keys(config.projects);
+  const resolvedProjectId =
+    config.projects[projectId] !== undefined
+      ? projectId
+      : projectKeys.length === 1
+        ? projectKeys[0]
+        : null;
+
+  if (resolvedProjectId === null) {
     throw new AoContextError(
       `Project '${projectId}' not found in AO config (${config.configPath})`,
     );
@@ -84,7 +115,7 @@ async function buildAoContext(projectId: string): Promise<AoContext> {
 
   const registry = createPluginRegistry();
   try {
-    await registry.loadFromConfig(config);
+    await registry.loadFromConfig(config, importPluginFromWorkflow);
   } catch (err) {
     throw new AoContextError(
       `Failed to load AO plugins from config for project '${projectId}'`,
@@ -93,9 +124,14 @@ async function buildAoContext(projectId: string): Promise<AoContext> {
   }
 
   const sm = createSessionManager({ config, registry });
-  const lm = createLifecycleManager({ config, registry, sessionManager: sm, projectId });
+  const lm = createLifecycleManager({
+    config,
+    registry,
+    sessionManager: sm,
+    projectId: resolvedProjectId,
+  });
 
-  return { sm, lm, config };
+  return { sm, lm, config, projectId: resolvedProjectId };
 }
 
 /** Test-only helper to drop the per-projectId context cache. */
@@ -115,7 +151,7 @@ export async function spawnAgentSession(
   opts: SpawnAgentOptions,
 ): Promise<SpawnAgentResult> {
   const session = await ctx.sm.spawn({
-    projectId: opts.projectId,
+    projectId: ctx.projectId,
     agent: opts.agent,
     branch: opts.branch,
     prompt: opts.prompt,

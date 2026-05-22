@@ -24,7 +24,12 @@ describe("ensureAowConfig", () => {
     expect(result.projectId).toBeTruthy();
     const text = await readFile(result.configPath, "utf8");
     expect(text).toContain("$schema:");
-    expect(text).toContain(`name: ${result.projectId}`);
+    // The on-disk `name:` is the basename-sanitized local id. The returned
+    // projectId is the registered id from the global config (which may have
+    // a hash suffix). Both should be present; the local id is a prefix of
+    // the returned id.
+    expect(text).toMatch(/^name: [a-z0-9_-]+$/m);
+    expect(result.projectId).toMatch(/^[a-z0-9_-]+$/);
     expect(text).toContain(`path: ${dir}`);
     expect(text).toContain("defaultBranch: main");
     expect(text).toContain("sessionPrefix: aow");
@@ -37,7 +42,7 @@ describe("ensureAowConfig", () => {
     await writeFile(join(dir, "agent-orchestrator.yaml"), cfg);
     const result = await ensureAowConfig(dir);
     expect(result.created).toBe(false);
-    expect(result.projectId).toBe("existing-proj");
+    expect(result.projectId).toMatch(/^existing-proj/);
     const text = await readFile(result.configPath, "utf8");
     expect(text).toBe(cfg);
   });
@@ -56,7 +61,7 @@ describe("ensureAowConfig", () => {
     await writeFile(join(dir, "agent-orchestrator.yaml"), cfg);
     const result = await ensureAowConfig(dir);
     expect(result.created).toBe(false);
-    expect(result.projectId).toBe("first-proj");
+    expect(result.projectId).toMatch(/^first-proj/);
   });
 
   it("sanitizes special characters in cwd basename", async () => {
@@ -79,6 +84,6 @@ describe("ensureAowConfig", () => {
     expect(a.projectId).toBe(b.projectId);
     expect(a.configPath).toBe(b.configPath);
     const text = await readFile(a.configPath, "utf8");
-    expect(text).toContain(`name: ${a.projectId}`);
+    expect(text).toMatch(/^name: [a-z0-9_-]+$/m);
   });
 });
