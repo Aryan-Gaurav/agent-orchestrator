@@ -321,3 +321,47 @@ Phase 3.8 worked. The engine now does revision loops, surfaces lint errors, and 
 3. **Zombie sessions (Finding 8)** — quality-of-life, not a blocker. Medium priority.
 
 Estimated effort: 3 + 6 + 8 = ~1 engineer-day total. Then another dogfood to confirm.
+---
+
+## Run 5 — Post Phase 3.9 (2026-05-22)
+
+Run id: `wf-url-shortener-build-20260522T044835`. All 5 Phase 3.8 + all 3 Phase 3.9 fixes active.
+
+### Outcome
+
+| Step | Status | Attempts | Notes |
+|---|---|---|---|
+| design | ✅ completed | 2 | revised once on `out-of-scope` slug mismatch |
+| hld | ✅ completed | 3 | revised twice on `claim_mismatch` errors |
+| impl | ✅ completed | 2 | revised once; produced 7 source files |
+| tests | ❌ failed | 3 | exhausted max_revisions on `section_not_found` for `.ts` files |
+
+The agent produced 3 vitest files (`HashRing.test.ts`, `Shortener.test.ts`, `e2e.test.ts`) plus a working URL shortener. Manual verification: `pnpm test` reports **10/10 tests passing**, server smoke-tested with real HTTP (POST /shorten → 201 with code, GET /:code → 302 redirect, GET /unknown → 404).
+
+### Finding 9 — Resolver doesn't understand code-symbol anchors
+
+The `tests` step failed with errors like:
+
+```
+[section_not_found] __tests__/Shortener.test.ts:src/Shortener.ts#shorten — Section "shorten" not found in src/Shortener.ts
+[section_not_found] __tests__/HashRing.test.ts:src/HashRing.ts#addShard — Section "addShard" not found in src/HashRing.ts
+[section_not_found] __tests__/HashRing.test.ts:src/HashRing.ts#shardForKey — Section "shardForKey" not found in src/HashRing.ts
+```
+
+The agent's citations were correct (`shorten`, `addShard`, `shardForKey` are all real functions in those files). The resolver's `extractSections` (`packages/workflow/src/resolver/parse.ts:49`) only matches Markdown `^(#{1,6})\s+` headings, so source files have zero sections and every code-symbol anchor fails.
+
+**Smoking gun:** the same agent's citations against `hld.md#httpserver`, `requirements.md#functional-requirements`, `design.md#id-generation-and-collisions` all resolved fine — because those are Markdown.
+
+**Fix path (Phase 3.10):** add an `extractCodeSections` regex-based extractor for `.ts`/`.tsx`/`.js`/`.jsx`/`.mts`/`.cts`/`.mjs`/`.cjs` that emits "sections" for `function`/`class`/`const`/`interface`/`type`/`enum`/method declarations. Slug rule unchanged. Markdown path unchanged. Other languages fall through to existing "no sections" behavior. Brief: `.workflow-bootstrap/phase-3.10-prompt.md`.
+
+### Finding 10 — Zombie sessions persist despite Fix 3 (Phase 3.9)
+
+End of run: 4 active `ust-N` tmux sessions (ust-8, ust-11, ust-13, ust-16) plus orchestrator. Fix 3 from Phase 3.9 was supposed to kill the prior attempt's session before spawning the next one. Either it's not firing for the *final-failed* attempt (only inter-revision kills), or the kill is fire-and-forget and the session doesn't actually terminate.
+
+Lower-priority than Finding 9 (cosmetic, not blocking). Triage in Phase 3.11.
+
+### Verdict for Phase 3.10
+
+The engine now runs a 4-step real software workflow to **75% completion automatically**, with a working build at the end. The remaining failure is a single resolver limitation (code-symbol anchors) — a contained ~half-day fix. Post-fix, the workflow should reach 100%.
+
+Estimated effort: 4 hours implementation + 1 hour docs + 1 hour re-dogfood. Brief ships as `.workflow-bootstrap/phase-3.10-prompt.md`.
