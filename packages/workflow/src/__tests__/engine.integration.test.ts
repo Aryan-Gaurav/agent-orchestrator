@@ -334,6 +334,7 @@ describe("runWorkflow integration", () => {
       aoContextFactory: async () => buildAoCtx(controller),
       completionPollIntervalMs: 5,
       completionIdleThresholdMs: 10,
+      completionSpawnGraceMs: 0,
     });
 
     // The step itself should not be marked failed by the missing-workspace path —

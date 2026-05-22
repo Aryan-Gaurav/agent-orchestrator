@@ -29,6 +29,9 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 const { waitForStepCompletion } = await import("../completion-detector.js");
+const { isTerminalSnapshot, DEFAULT_SPAWN_GRACE_MS } = await import(
+  "../completion-detector.js"
+);
 
 type Snapshot = {
   status: string;
@@ -254,6 +257,72 @@ describe("waitForStepCompletion", () => {
 
     await vi.advanceTimersByTimeAsync(2_000);
 
+    const result = await pending;
+    expect(result.kind).toBe("completed");
+  });
+});
+
+describe("isTerminalSnapshot — Phase 3.9 Fix 1: spawn race", () => {
+  it("does NOT classify activity=exited as terminal while status is pre-spawn (not_started)", () => {
+    const snap = snapshot("not_started", "exited");
+    const start = Date.now();
+    // At T+0 and well past the grace window: still not terminal, because
+    // activity-based exit is gated on a post-spawn status.
+    expect(isTerminalSnapshot(snap, start, DEFAULT_SPAWN_GRACE_MS)).toBe(false);
+    vi.setSystemTime(start + DEFAULT_SPAWN_GRACE_MS + 1_000);
+    expect(isTerminalSnapshot(snap, start, DEFAULT_SPAWN_GRACE_MS)).toBe(false);
+  });
+
+  it("classifies activity=exited as terminal once status has reached a post-spawn value (working)", () => {
+    const snap = snapshot("working", "exited");
+    expect(isTerminalSnapshot(snap, Date.now(), DEFAULT_SPAWN_GRACE_MS)).toBe(true);
+  });
+
+  it("treats a null snapshot as non-terminal during the spawn grace window, terminal after", () => {
+    const start = Date.now();
+    expect(isTerminalSnapshot(null, start, DEFAULT_SPAWN_GRACE_MS)).toBe(false);
+    vi.setSystemTime(start + DEFAULT_SPAWN_GRACE_MS + 1);
+    expect(isTerminalSnapshot(null, start, DEFAULT_SPAWN_GRACE_MS)).toBe(true);
+  });
+
+  it("classifies canonical TERMINAL_STATUSES (e.g. 'terminated') as terminal regardless of activity or grace", () => {
+    const snap = snapshot("terminated", null);
+    expect(isTerminalSnapshot(snap, Date.now(), DEFAULT_SPAWN_GRACE_MS)).toBe(true);
+  });
+});
+
+describe("waitForStepCompletion — Phase 3.9 Fix 1: spawn race end-to-end", () => {
+  it("does NOT fail when the first 3 polls return {status: not_started, activity: exited} and then the session settles to idle", async () => {
+    // Outputs appear by the 4th poll.
+    let pollCount = 0;
+    fsAccess.mockImplementation(async (path: string) => {
+      // Hide outputs until after the spawn-race polls so the early
+      // `outputsExist` check can't short-circuit.
+      if (pollCount < 4) {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }
+      if (path === DESIGN_ABS || path === NOTES_ABS) return;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+    fsReadFile.mockImplementation(async () => Buffer.from("body"));
+    getSessionStatus.mockImplementation(async () => {
+      pollCount += 1;
+      if (pollCount <= 3) return snapshot("not_started", "exited");
+      return snapshot("idle", "idle");
+    });
+
+    const pending = waitForStepCompletion({
+      ctx: fakeCtx,
+      sessionId: "ses-1",
+      expectedOutputs: OUTPUTS,
+      artifactsDir: ARTIFACTS_DIR,
+      timeoutMs: 60_000,
+      idleThresholdMs: 10,
+      pollIntervalMs: 100,
+      spawnGraceMs: 30_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
     const result = await pending;
     expect(result.kind).toBe("completed");
   });

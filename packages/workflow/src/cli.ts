@@ -13,6 +13,7 @@ import { Command } from "commander";
 import { decideGate, readPendingGates } from "./approvals.js";
 import { createAoContext, type AoContext } from "./ao-client.js";
 import { ensureAowConfig } from "./cli/bootstrap.js";
+import { warnIfBuildStale } from "./cli/build-freshness.js";
 import { cleanCmd as runCleanCmd, type CleanCmdOpts } from "./cli/clean.js";
 import { ensureDaemonRunning } from "./cli/daemon-check.js";
 import { emitHopsForRun } from "./cli/render-hops.js";
@@ -410,6 +411,7 @@ function buildProgram(): Command {
 }
 
 async function main(): Promise<void> {
+  await warnIfBuildStale();
   const program = buildProgram();
   try {
     await program.parseAsync(process.argv);

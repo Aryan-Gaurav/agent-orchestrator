@@ -48,6 +48,7 @@ export interface StepRunContext {
   aoCtx: AoContext;
   completionPollIntervalMs?: number;
   completionIdleThresholdMs?: number;
+  completionSpawnGraceMs?: number;
 }
 
 export type StepRunOutcome =
@@ -133,6 +134,7 @@ export async function runAgentStep(
     timeoutMs,
     pollIntervalMs: ctx.completionPollIntervalMs,
     idleThresholdMs: ctx.completionIdleThresholdMs,
+    spawnGraceMs: ctx.completionSpawnGraceMs,
   });
 
   if (result.kind === "timeout") {
@@ -186,6 +188,14 @@ export async function runAgentStep(
         current_attempt: undefined,
         history: [...(prev.history ?? []), attemptRecord],
       }));
+      // Reclaim the failed attempt's tmux session before spawning the next
+      // one — otherwise each revision leaks a zombie pane. Branch + worktree
+      // are preserved for forensics. Best-effort: a kill failure must not
+      // block the revision.
+      await killSession(ctx.aoCtx, sessionId, "auto_cleanup").catch((err) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        log.warn(`[${step.id}] failed to kill prior session ${sessionId}: ${reason}`);
+      });
       log.warn(
         `[${step.id}] citation lint failed: ${lintReport.errors.length} error(s); revising (attempt ${attempts}/${maxRevisions})`,
       );
