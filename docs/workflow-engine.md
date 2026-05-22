@@ -1594,6 +1594,102 @@ prompt-template.ts.
 
 ---
 
+## 18. Standalone `aow` Surface (Phase 3.6)
+
+The original design (§2, §9) assumed users already have AO configured — the workflow engine just composes on top of a known AO project. Phase 3.6 added a thin **surface layer** so `aow run` works in a *fresh* repo with zero setup, matching `ao`'s UX (`npm i -g @aoagents/ao` → run from anywhere). This section documents what 3.6 added and how the pieces fit together.
+
+### Package: `packages/aow/`
+
+A new sub-package, **publishable as `@aoagents/aow`**. It is a thin shim:
+
+- Declares one runtime dep: `@aoagents/ao-workflow`.
+- Bin entry `aow` resolves into `node_modules/@aoagents/ao-workflow/dist/cli.js`.
+- No plugin deps directly — those live on the workflow package itself so the resolution tree stays predictable (see "Plugin Resolution" below).
+
+This is the global wrapper. `packages/workflow/` is the engine; `packages/aow/` is the user-facing binary.
+
+### `bootstrap.ts` — auto-create `agent-orchestrator.yaml`
+
+`ensureAowConfig(cwd)` runs at the start of `aow run`:
+
+1. If `agent-orchestrator.yaml` (or `.yml`) already exists in cwd, parse it for the project id and return.
+2. Otherwise, write a minimal **flat** config (no `projects:` wrapper):
+   ```yaml
+   $schema: ...
+   name: <basename of cwd>
+   path: <cwd>
+   defaultBranch: main
+   sessionPrefix: aow
+   agent: claude-code
+   workspace: worktree
+   ```
+3. Register the project in `~/.agent-orchestrator/config.yaml` by calling AO core's exported `registerProjectInGlobalConfig`. AO core remains the single writer of global state; bootstrap never touches the file directly.
+
+The returned `BootstrapResult.projectId` is the **registered** id (AO core adds a hash suffix for collision safety across multiple checkouts).
+
+### `daemon-check.ts` — auto-start the AO supervisor
+
+`ensureDaemonRunning()` reads `~/.agent-orchestrator/running.json`:
+
+- If the pid is alive, return immediately.
+- Otherwise spawn `ao start --no-dashboard` detached (`unref()`'d so it doesn't pin the parent), and poll for up to 10s for it to register.
+- If `ao` isn't on PATH, throw `WF_AO_CONTEXT` with the install hint.
+
+### Project Resolution — cwd is the source of truth
+
+The user's workflow.yaml has `project_id: foo`, but bootstrap registered as `foo_<hash>`. The original `createAoContext(projectId)` looked up `config.projects[projectId]` exact-match and failed.
+
+`ao-client.ts` was updated to resolve in this order:
+
+1. Direct match: `config.projects[projectId]` exists → use it.
+2. **Cwd fallback**: AO core's `buildEffectiveConfigFromFlatLocalPath` already narrows the loaded config to the *single* project whose `path:` matches cwd. If there's exactly one project in `config.projects`, use its id regardless of what the workflow.yaml said.
+
+This is the canonical layering: **the directory is the project identity**; `project_id` in workflow.yaml is a label, not a binding key. The resolved id is then stored on `AoContext.projectId` and used by all downstream calls (spawn, lifecycle).
+
+### Plugin Resolution — import from the workflow package
+
+AO core's `plugin-registry.ts` does `import('@aoagents/ao-plugin-runtime-tmux')` dynamically. With Node's default symlink resolution, that import resolves from `packages/core/node_modules/` — which has no plugins.
+
+`ao-client.ts` passes a custom `importFn` to `registry.loadFromConfig(config, importFn)`. The importFn is a closure in the workflow package, so `import()` calls inside it resolve from `packages/workflow/node_modules/` — where all plugin packages live as workspace symlinks (declared as `workspace:*` deps in `packages/workflow/package.json`).
+
+The workflow package therefore carries the full plugin set: agent-claude-code, agent-codex, agent-aider, agent-opencode, agent-cursor, agent-kimicode, runtime-tmux, runtime-process, workspace-worktree, workspace-clone, scm-github, scm-gitlab, tracker-github, tracker-linear, tracker-gitlab, and all notifiers. The `terminal-*` plugins are excluded — `aow` does not open terminal panes.
+
+### Boot Sequence (full)
+
+```
+aow run workflow.yaml
+  │
+  ├─ ensureAowConfig(cwd)               # bootstrap
+  │    ├─ write or read agent-orchestrator.yaml
+  │    └─ registerProjectInGlobalConfig (single writer = AO core)
+  │
+  ├─ ensureDaemonRunning()              # daemon-check
+  │    └─ spawn `ao start --no-dashboard` if needed
+  │
+  ├─ runWorkflow({ workflowPath, ... })
+  │    └─ createAoContext(projectId)
+  │         ├─ loadConfig()             # AO core; uses cwd-path match
+  │         ├─ resolve projectId        # direct → cwd fallback
+  │         ├─ loadFromConfig(cfg, importFn)  # plugins from workflow pkg
+  │         └─ wire SessionManager + LifecycleManager
+  │
+  └─ engine loop: spawn step → poll completion → verify outputs → next step
+```
+
+### Constraints honored
+
+- No modifications to `packages/core/`. All Phase 3.6 changes live in `packages/workflow/` and `packages/aow/`.
+- AO core remains the single writer of `~/.agent-orchestrator/config.yaml`.
+- The published `@aoagents/aow` package is set up via `publishConfig` for `pnpm publish` when ready, but Phase 3.6 does not publish.
+
+### Out of Scope (Phase 3.6)
+
+- Actually publishing `@aoagents/aow` to npm. The package is set up; a human runs `pnpm publish` when ready.
+- Auto-installing `@aoagents/ao` if `ao` isn't on PATH. We throw a helpful error instead.
+- Migrating existing wrapped configs (`projects:` block) to flat form. Bootstrap only writes new flat configs.
+
+---
+
 ## Glossary
 
 - **Workflow**: a YAML-defined DAG of steps
