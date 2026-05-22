@@ -78,6 +78,169 @@ export function extractSections(content: string): Section[] {
   return sections;
 }
 
+const CODE_FILE_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mts",
+  ".cts",
+  ".mjs",
+  ".cjs",
+];
+
+export function isCodeFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return CODE_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// Top-level declarations we want to expose as "sections" in source files.
+// Patterns are line-anchored (^ with m flag is enforced via per-line scan).
+const TOP_LEVEL_DECL_RES: RegExp[] = [
+  /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*[(<]/,
+  /^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b/,
+  /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]/,
+  /^(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)\b/,
+  /^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*[<=]/,
+  /^(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)\b/,
+];
+
+// Class method declarations: indented lines inside a class body. We only fire
+// while inside a `class { ... }` block tracked by a brace counter starting at
+// the class declaration line.
+const CLASS_METHOD_RE =
+  /^\s+(?:(?:public|private|protected|static|async|readonly|override)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
+
+const CONTROL_KEYWORDS = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "throw",
+  "do",
+  "else",
+  "constructor",
+]);
+
+function findTopLevelMatch(line: string): string | null {
+  for (const re of TOP_LEVEL_DECL_RES) {
+    const m = re.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+export function extractCodeSections(content: string): Section[] {
+  const lines = content.split(/\r?\n/);
+  type Decl = { heading: string; slug: string; line: number };
+  const decls: Decl[] = [];
+  const seen = new Set<string>();
+
+  let classDepth = 0;
+  let braceDepth = 0;
+  let classOpenDepth = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? "";
+
+    // Track top-level declarations (only when not inside any block).
+    if (braceDepth === 0) {
+      const name = findTopLevelMatch(raw);
+      if (name && !seen.has(name)) {
+        decls.push({ heading: name, slug: slugify(name), line: i });
+        seen.add(name);
+      }
+    } else if (classDepth > 0) {
+      // Inside a class body — capture method declarations.
+      const mm = CLASS_METHOD_RE.exec(raw);
+      if (mm) {
+        const name = mm[1];
+        if (!CONTROL_KEYWORDS.has(name) && !seen.has(name)) {
+          decls.push({ heading: name, slug: slugify(name), line: i });
+          seen.add(name);
+        }
+      }
+    }
+
+    // Detect class block entry on this line so we count its braces correctly.
+    const enteringClass =
+      braceDepth === 0 &&
+      /^(?:export\s+)?(?:abstract\s+)?class\s+[A-Za-z_$][\w$]*/.test(raw);
+
+    // Update brace depth using a string-and-comment aware scan.
+    const delta = countBraceDelta(raw);
+    const before = braceDepth;
+    braceDepth += delta;
+    if (braceDepth < 0) braceDepth = 0;
+
+    if (enteringClass && braceDepth > before) {
+      classDepth++;
+      classOpenDepth = before; // depth we were at before entering
+    } else if (classDepth > 0 && braceDepth <= classOpenDepth) {
+      classDepth--;
+    }
+  }
+
+  const sections: Section[] = [];
+  for (let i = 0; i < decls.length; i++) {
+    const d = decls[i];
+    const end = i + 1 < decls.length ? decls[i + 1].line : lines.length;
+    sections.push({
+      heading: d.heading,
+      slug: d.slug,
+      level: 1,
+      startLine: d.line,
+      endLine: end,
+    });
+  }
+  return sections;
+}
+
+function countBraceDelta(line: string): number {
+  let depth = 0;
+  let inString: '"' | "'" | "`" | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    const next = line[i + 1];
+    if (inLineComment) break;
+    if (inBlockComment) {
+      if (c === "*" && next === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === inString) inString = null;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      inLineComment = true;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      inString = c;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+  }
+  return depth;
+}
+
 const CITATION_RE =
   /(?:<!--|\/\/|#)\s*ref:\s*([^\s"]+)(?:\s+claim="((?:[^"\\]|\\.)*)")?\s*(?:-->)?/g;
 

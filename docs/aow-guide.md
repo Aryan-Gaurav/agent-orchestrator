@@ -126,6 +126,16 @@ When a step's prompt references an upstream document (e.g., `inputs.requirements
 
 All three resolve to the heading `## Out of scope`.
 
+**Code-symbol anchors.** For `.ts`/`.tsx`/`.js`/`.jsx` files (and `.mts`/`.cts`/`.mjs`/`.cjs`), `#fragment` matches a top-level declaration or class method by name. The same slug rule applies (`#shardForKey` and `#shardforkey` resolve identically). Cite either flavor as natural for the file you reference:
+
+```typescript
+// ref: src/Shortener.ts#shorten claim="generates a 7-char base62 code"
+```
+
+```markdown
+<!-- ref: design.md#id-generation-and-collisions claim="rejection sampling on bytes ≥ 248" -->
+```
+
 **Hop-depth cap.** When the agent walks the citation chain back through more than 4 hops on the same step, the resolver attaches a `hop_depth_4` warning and the linter surfaces a `hop_depth_exceeded` warning on the run. The warning is informational, not fatal — it usually signals that the workflow has too many indirection layers and is worth restructuring.
 
 ---

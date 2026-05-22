@@ -429,3 +429,116 @@ describe("resolveCitation — slug normalization (Fix 2)", () => {
     expect(r2.ok).toBe(true);
   });
 });
+
+describe("resolveCitation — code-symbol anchors (Phase 3.10)", () => {
+  function writeArtifact(name: string, content: string): string {
+    const root = mkdtempSync(join(tmpdir(), "aow-code-"));
+    const artifactsDir = join(root, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    writeFileSync(join(artifactsDir, name), content, "utf8");
+    return artifactsDir;
+  }
+
+  it("resolves `Shortener.ts#shorten` against an exported function", async () => {
+    const artifactsDir = writeArtifact(
+      "Shortener.ts",
+      [
+        "export function shorten(url: string): string {",
+        '  return "abc1234";',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const r = await resolveCitation({
+      ref: "Shortener.ts#shorten",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "code-fn",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.section_content).toContain("export function shorten");
+    }
+  });
+
+  it("resolves `HashRing.ts#addShard` against a class-method declaration", async () => {
+    const artifactsDir = writeArtifact(
+      "HashRing.ts",
+      [
+        "export class HashRing {",
+        "  addShard(name: string): void {",
+        "    // adds a shard",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const r = await resolveCitation({
+      ref: "HashRing.ts#addShard",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "code-method",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.section_content).toContain("addShard");
+    }
+  });
+
+  it("returns section_not_found with available symbols for a missing anchor", async () => {
+    const artifactsDir = writeArtifact(
+      "Shortener.ts",
+      "export function shorten() { return 'x'; }\nexport function decode() { return 'y'; }\n",
+    );
+    const r = await resolveCitation({
+      ref: "Shortener.ts#nonexistent",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "code-miss",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBe("section_not_found");
+      expect(r.available_sections).toEqual(
+        expect.arrayContaining(["shorten", "decode"]),
+      );
+    }
+  });
+
+  it("leaves the existing Markdown path intact", async () => {
+    const r = await resolveCitation({
+      ref: "design.md#auth-flow",
+      artifactsDir: FIXTURES,
+      workspacePath: ws(),
+      stepId: "md-still-works",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.section_heading).toBe("## Auth Flow");
+    }
+  });
+
+  it("matches a claim against text inside the function body", async () => {
+    const artifactsDir = writeArtifact(
+      "Shortener.ts",
+      [
+        "export function shorten(url: string): string {",
+        "  // generates a 7-char base62 code",
+        '  return "abc1234";',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const r = await resolveCitation({
+      ref: "Shortener.ts#shorten",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "code-claim",
+      claim: "generates a 7-char base62 code",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.claim_match?.found).toBe(true);
+    }
+  });
+});

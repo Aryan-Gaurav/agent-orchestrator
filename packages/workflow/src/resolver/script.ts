@@ -16,8 +16,10 @@ import type {
   ResolverResponse,
 } from "../types.js";
 import {
+  extractCodeSections,
   extractOutgoingRefs,
   extractSections,
+  isCodeFile,
   matchClaim,
   parseRef,
   sectionBody,
@@ -192,7 +194,9 @@ export async function resolveCitation(
           };
         }
       } else {
-        const sections = extractSections(content);
+        const sections = isCodeFile(parsed.file)
+          ? extractCodeSections(content)
+          : extractSections(content);
         // Accept any of: GitHub-style slug ("out-of-scope"), the literal
         // heading ("Out of scope"), or a legacy underscore form
         // ("out_of_scope"). Normalize the fragment through slugify so we

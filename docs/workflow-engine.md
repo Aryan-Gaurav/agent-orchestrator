@@ -1277,6 +1277,24 @@ citation fragment, so all three of these forms resolve to the heading
   - `requirements.md#Out of scope` (literal heading)
   - `requirements.md#out_of_scope` (underscores treated as spaces first)
 
+**Code-symbol anchors (Phase 3.10).** For source files with extension
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs`, or `.cjs`, the
+`#fragment` matches a top-level declaration or class method **by name**
+instead of a Markdown heading. The same slug rule applies, so both
+`#shardForKey` and `#shardforkey` resolve identically. Section body —
+the text passed to `matchClaim` for `claim="..."` validation — runs
+from the declaration line to the start of the next top-level
+declaration (or end of file).
+
+Patterns detected: `function`, `class`, `interface`, `type`, `enum`,
+top-level `const`/`let`/`var`, and class-method declarations. Parsing is
+regex-based (no AST dependency); when a citation cannot be matched the
+resolver returns `section_not_found` with `available_sections` listing
+every symbol it did find, so the agent can self-correct. Files with
+other extensions fall through to the existing behavior: a file-only
+citation (no `#fragment`) still works; a `#fragment` against a
+non-supported language returns `section_not_found`.
+
 ### 17.1 Resolver Script — `.ao/aow-ref`
 
 The engine writes a small Node script into each agent's worktree at
