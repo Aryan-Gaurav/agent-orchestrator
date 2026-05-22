@@ -345,6 +345,8 @@ Please revise and address this feedback. Read the prior output at
 
 Each step tracks an `attempt` counter. When attempt would exceed `max_revisions`, the step is marked `failed` with reason `revision_limit_exceeded`. The user can `aow retry --reset-attempts <run> <step>` to force another try.
 
+`agent` steps also revise automatically when the citation linter rejects the output (`failure_reason: "citations_invalid"`). The engine writes the `LintReport.errors` as feedback into `feedback/<step>-attempt-<n>.md`, resets the step to `pending`, increments `attempts`, and re-enters the spawn loop. The agent's `max_revisions` (default 3) caps this loop; once the cap is hit, the run is marked `failed` with the final `LintReport` preserved in `current_attempt.lint_report`. Non-citation failures (spawn errors, timeouts, missing outputs) abort the run immediately — they do not consume revision attempts.
+
 ---
 
 ## 5. State Management
@@ -1251,6 +1253,29 @@ the format and gives agents a deterministic way to traverse references
 without bloating prompt context.
 
 Three pieces, all delivered in Phase 3:
+
+### 17.0 Path and slug resolution rules (Phase 3.8)
+
+Before §17.1 details the script's CLI, two compatibility rules:
+
+**File-path lookup.** The resolver consults the step's `inputs:` map
+first. A citation `foo.md` resolves to an input's absolute path when the
+input's name OR basename equals `foo.md` (or its basename equals the
+citation's basename). Only when no input matches does the resolver fall
+back to filesystem lookup under `artifacts_dir`. The linter passes the
+inputs to the subprocess via `--inputs '<json>'` so the same mapping is
+honored by the script when run directly.
+
+**Section slug match.** The `#fragment` is normalized with the standard
+GitHub slug rule (lowercase; non-word characters dropped; whitespace
+collapsed to `-`; leading/trailing `-` stripped) before being compared
+to the heading's slug. The same normalization is applied to the
+citation fragment, so all three of these forms resolve to the heading
+`## Out of scope`:
+
+  - `requirements.md#out-of-scope` (slug)
+  - `requirements.md#Out of scope` (literal heading)
+  - `requirements.md#out_of_scope` (underscores treated as spaces first)
 
 ### 17.1 Resolver Script — `.ao/aow-ref`
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -307,6 +307,7 @@ describe("parseCliArgs", () => {
       artifactsDir: "/a",
       workspacePath: "/w",
       stepId: "s1",
+      inputs: undefined,
     });
   });
 
@@ -323,5 +324,108 @@ describe("parseCliArgs", () => {
 
   it("throws when step id missing", () => {
     expect(() => parseCliArgs(["node", "s.js", "a.md"], {}, "/x")).toThrow();
+  });
+
+  it("parses --inputs as JSON array of {name, path}", () => {
+    const args = parseCliArgs(
+      [
+        "node", "s.js", "a.md",
+        "--step-id", "s",
+        "--inputs", JSON.stringify([{ name: "req", path: "/abs/requirements.md" }]),
+      ],
+      {}, "/cwd",
+    );
+    expect(args.inputs).toEqual([{ name: "req", path: "/abs/requirements.md" }]);
+  });
+
+  it("rejects malformed --inputs JSON", () => {
+    expect(() => parseCliArgs(
+      ["node", "s.js", "a.md", "--step-id", "s", "--inputs", "not-json"],
+      {}, "/cwd",
+    )).toThrow(/--inputs/);
+  });
+});
+
+describe("resolveCitation — inputs map (Fix 1)", () => {
+  it("resolves citation file via input.name match (absolute path)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aow-inputs-"));
+    const inputFile = join(root, "requirements.md");
+    writeFileSync(inputFile, "# Reqs\n\n## Out of scope\nNothing here.\n", "utf8");
+    const artifactsDir = join(root, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+
+    const r = await resolveCitation({
+      ref: "requirements.md#out-of-scope",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "t",
+      inputs: [{ name: "requirements", path: inputFile }],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.section_heading).toBe("## Out of scope");
+    }
+  });
+
+  it("matches input by basename when name differs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aow-inputs-"));
+    const inputFile = join(root, "requirements.md");
+    writeFileSync(inputFile, "# Reqs\n\n## Out of scope\nx\n", "utf8");
+    const artifactsDir = join(root, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+
+    // Input is named "req" but cite uses "requirements.md" — basename of the
+    // input path matches the citation file.
+    const r = await resolveCitation({
+      ref: "requirements.md",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "t",
+      inputs: [{ name: "req", path: inputFile }],
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("falls back to filesystem when no matching input", async () => {
+    // No inputs given; the existing FIXTURES design.md is reachable.
+    const r = await resolveCitation({
+      ref: "design.md#auth-flow",
+      artifactsDir: FIXTURES,
+      workspacePath: ws(),
+      stepId: "t",
+      inputs: [{ name: "other", path: "/nonexistent/path.md" }],
+    });
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("resolveCitation — slug normalization (Fix 2)", () => {
+  it("matches GitHub-style slug, literal heading, and underscore form", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aow-slug-"));
+    const artifactsDir = join(root, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    writeFileSync(
+      join(artifactsDir, "doc.md"),
+      "# Title\n\n## Out of scope\nbody\n\n## API: usage details\nb2\n",
+      "utf8",
+    );
+
+    for (const frag of ["out-of-scope", "Out of scope", "out_of_scope", "OUT-OF-SCOPE"]) {
+      const r = await resolveCitation({
+        ref: `doc.md#${frag}`,
+        artifactsDir,
+        workspacePath: ws(),
+        stepId: "s",
+      });
+      expect(r.ok, `fragment "${frag}" should resolve`).toBe(true);
+    }
+
+    const r2 = await resolveCitation({
+      ref: "doc.md#api-usage-details",
+      artifactsDir,
+      workspacePath: ws(),
+      stepId: "s2",
+    });
+    expect(r2.ok).toBe(true);
   });
 });

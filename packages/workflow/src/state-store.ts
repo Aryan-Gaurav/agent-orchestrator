@@ -25,6 +25,21 @@ const artifactSchema = z.object({
   hash: z.string().min(1),
 });
 
+const lintFindingSchema = z.object({
+  kind: z.enum(["error", "warning"]),
+  code: z.string().min(1),
+  outputFile: z.string().min(1),
+  ref: z.string().optional(),
+  claim: z.string().optional(),
+  message: z.string().min(1),
+  detail: z.string().optional(),
+});
+
+const lintReportSchema = z.object({
+  errors: z.array(lintFindingSchema),
+  warnings: z.array(lintFindingSchema),
+});
+
 const attemptRecordSchema = z.object({
   session_id: z.string().min(1),
   branch: z.string().min(1),
@@ -32,6 +47,7 @@ const attemptRecordSchema = z.object({
   completed_at: z.string().min(1).optional(),
   inputs: z.array(artifactSchema),
   outputs: z.array(artifactSchema),
+  lint_report: lintReportSchema.optional(),
 });
 
 const stepStatusSchema = z.enum([
@@ -51,6 +67,7 @@ const stepStateSchema = z.object({
   history: z.array(attemptRecordSchema).optional(),
   awaiting_since: z.string().min(1).optional(),
   failure_reason: z.string().min(1).optional(),
+  warnings: z.array(z.string().min(1)).optional(),
 });
 
 const runStateSchema = z.object({

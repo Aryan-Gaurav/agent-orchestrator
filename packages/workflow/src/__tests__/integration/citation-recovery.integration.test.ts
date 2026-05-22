@@ -18,7 +18,7 @@ vi.mock("@aoagents/ao-core", () => ({
 }));
 
 const { runWorkflow } = await import("../../engine.js");
-const { loadRunState, updateStep } = await import("../../state-store.js");
+const { loadRunState } = await import("../../state-store.js");
 const { showCmd } = await import("../../cli.js");
 
 interface FakeSession {
@@ -147,7 +147,7 @@ async function setupWorkspace(): Promise<{ dir: string; workflowPath: string; ar
 }
 
 describe("citation recovery integration", () => {
-  it("rejects bad citation, accepts retry, records hops, and --hops prints them", async () => {
+  it("rejects bad citation, auto-revises with feedback, records hops, and --hops prints them", async () => {
     const ws = await setupWorkspace();
     const sessions = new Map<string, FakeSession>();
     const writeArt = (name: string, body: string): AgentScript => ({
@@ -165,32 +165,26 @@ describe("citation recovery integration", () => {
       aoContextFactory: aoFactory, completionPollIntervalMs: 5, completionIdleThresholdMs: 10,
     };
 
-    // First run: design completes, impl fails with citations_invalid.
+    // Single run: design completes, impl fails citations once, gets revised
+    // automatically (Fix 3), and succeeds on attempt 2.
     const first = await runWorkflow(runOpts);
-    expect(first.status).toBe("failed");
-    const afterFirst = await loadRunState(first.runDir);
-    expect(afterFirst.steps.design.status).toBe("completed");
-    expect(afterFirst.steps.impl.status).toBe("failed");
-    expect(afterFirst.steps.impl.failure_reason).toBe("citations_invalid");
+    expect(first.status).toBe("completed");
+    const finalState = await loadRunState(first.runDir);
+    expect(finalState.steps.design.status).toBe("completed");
+    expect(finalState.steps.impl.status).toBe("completed");
+    expect(finalState.steps.impl.attempts).toBe(2);
+
+    // The first failed attempt is preserved in history with its lint report.
+    const implHistory = finalState.steps.impl.history ?? [];
+    expect(implHistory).toHaveLength(1);
+    expect(implHistory[0].lint_report?.errors.some((e) => e.code === "section_not_found")).toBe(true);
 
     // Feedback file from the linter for the next attempt.
     const fb = await readFile(join(first.runDir, "feedback", "impl-attempt-2.md"), "utf8");
     expect(fb).toContain("section_not_found");
 
-    // Reset impl to pending so runWorkflow picks it up again — the engine
-    // doesn't auto-retry failed steps; this mirrors `--rerun impl` semantics.
-    await updateStep(first.runDir, "impl", (prev) => ({
-      ...prev, status: "pending", failure_reason: undefined,
-    }));
-
-    // Second run: impl succeeds with valid citation.
-    const second = await runWorkflow({ ...runOpts, runId: first.runId });
-    expect(second.status).toBe("completed");
-    const finalState = await loadRunState(second.runDir);
-    expect(finalState.steps.impl.status).toBe("completed");
-    expect(finalState.steps.impl.attempts).toBe(2);
-
     // Retry prompt carries the prior-feedback preamble.
+    expect(spawn).toHaveBeenCalledTimes(3); // design + impl x2
     const retryPrompt = (spawn.mock.calls[2][0] as { prompt: string }).prompt;
     expect(retryPrompt).toContain("PRIOR ATTEMPT FEEDBACK");
     expect(retryPrompt).toContain("section_not_found");
@@ -204,7 +198,7 @@ describe("citation recovery integration", () => {
     // `aow show --hops` smoke: capture stdout. State stores only the latest
     // attempt's session, so the printed trail is the successful one.
     const out = await captureStdout(() => withCwd(ws.dir, () =>
-      showCmd(second.runId, { hops: true, aoContextFactory: aoFactory })));
+      showCmd(first.runId, { hops: true, aoContextFactory: aoFactory })));
     expect(out).toContain("Step: impl");
     expect(out).toContain("section-a");
     expect(out).toContain("design.md");

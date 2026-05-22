@@ -114,7 +114,19 @@ When a step's prompt references an upstream document (e.g., `inputs.requirements
 - Markdown: `<!-- ref: requirements.md#section-id claim="..." -->`
 - Code: `// ref: requirements.md#section-id claim="..."`
 
-`aow` runs a citation linter after each agent step. Missing citations fail the step (the agent re-runs with feedback).
+`aow` runs a citation linter after each agent step. Errors fail the step; the agent is re-spawned with the lint report as feedback up to `max_revisions` times (default 3). Set `max_revisions` on the step to tune the cap.
+
+**Path resolution.** The file in a citation (`requirements.md`) is resolved by matching the step's declared `inputs:` first (by name OR basename), then falling back to the artifacts directory. You can therefore cite the file by its logical name in the prompt without exposing relative paths like `../../requirements.md`.
+
+**Section slugs.** The `#fragment` is normalized with the standard GitHub slug rule: lowercase, non-word characters dropped, whitespace runs collapsed to a single `-`, leading/trailing `-` stripped. Either form is accepted:
+
+- The slug itself: `requirements.md#out-of-scope`
+- The literal heading: `requirements.md#Out of scope`
+- The legacy underscore form: `requirements.md#out_of_scope`
+
+All three resolve to the heading `## Out of scope`.
+
+**Hop-depth cap.** When the agent walks the citation chain back through more than 4 hops on the same step, the resolver attaches a `hop_depth_4` warning and the linter surfaces a `hop_depth_exceeded` warning on the run. The warning is informational, not fatal — it usually signals that the workflow has too many indirection layers and is worth restructuring.
 
 ---
 
@@ -168,6 +180,18 @@ List workflows visible in the cwd.
 ### `aow runs`
 
 List active + recent runs in the cwd.
+
+### `aow clean [<run-id>] [--all]`
+
+Kill AO sessions whose branch belongs to a workflow run. Useful when a previous run left dangling agent sessions and you want a clean slate.
+
+```bash
+aow clean wf-url-shortener-build-20260522T120000   # kill sessions for that run
+aow clean --all                                     # kill every aow-* session for this workflow
+```
+
+The command only touches sessions whose branch starts with `aow-<workflow.id>-`. Other AO sessions on the project are left alone. Kills use the `auto_cleanup` reason so they show up cleanly in the dashboard.
+
 
 ---
 
@@ -228,6 +252,8 @@ Run `--only design` twice into two artifact dirs, then approve only one. (DAG fa
 | `Project 'foo' not found in AO config` | Workflow's `project_id` doesn't match any registered project. | The cwd-fallback should handle this. If you see it, check `cat ~/.agent-orchestrator/config.yaml` and ensure your cwd's `path:` is registered. |
 | `Unable to resolve base ref for default branch "main"` | The cwd is a git repo with no commits. | `git commit --allow-empty -m init` or make a real commit. |
 | Step never completes | Agent is at a permission prompt or blocked. | `tmux attach -t <session-id>` and check. |
+| `'aow-…' is already used by worktree at …` | A previous run's worktree still holds the branch (typically after a partial wipe of `.workflow-state/`). | New runs use run-id-suffixed branches so this should no longer occur. For pre-fix branches, run `aow clean --all` to kill stale sessions. |
+| Citation lint errors with no detail in the log | Run `aow show <run-id> --step <step>` — the `current_attempt.lint_report` field has the full list of errors and warnings. |
 
 ---
 
