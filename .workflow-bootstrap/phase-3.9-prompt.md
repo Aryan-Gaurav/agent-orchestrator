@@ -1,115 +1,259 @@
 # Phase 3.9 — Fix Spawn-Race + Build-Freshness + Zombie Sessions
 
-## Why
+## Required Reading
 
-Phase 3.8 fixed the citation/revision blockers. Re-dogfood (Run 4 in `docs/aow-dogfood-findings.md`) confirmed all 5 fixes work, but surfaced 3 new issues that block end-to-end runs:
+1. **`docs/aow-dogfood-findings.md` — read the entire "Run 4" section.** Findings 6/7/8 are the source of truth for symptoms, timestamps, and root-cause hypotheses. Every fix here maps to one of those findings.
+2. **`packages/workflow/src/completion-detector.ts`** — the polling loop that decides "step done / failed / timeout." This is where Fix 1 lives. Lines 96–101 (`isTerminalSnapshot`) and line 99 specifically (`if (snapshot.activity === "exited") return true;`) are the bug.
+3. **`packages/workflow/src/engine/step-runner.ts`** — the per-step orchestrator. Read end-to-end (~352 LOC). Pay attention to lines 90–110 (spawn site) and lines 180–193 (revision-loop branch — where Fix 3 wires in).
+4. **`packages/workflow/src/ao-client.ts`** — the AO facade. `getSessionStatus` returns `SessionStatusSnapshot` (status + activity + lastActivityAt). `killSession(ctx, sessionId, reason?)` already exists and accepts the lifecycle kill reasons.
+5. **`packages/core/src/lifecycle-state.ts`** — canonical `SessionStatus` values: `not_started`, `working`, `idle`, `needs_input`, `stuck`, `detecting`, `done`, `terminated`. (Legacy status types include `spawning` — see `deriveLegacyStatus`.) Fix 1 needs to know which of these are "transient setup" vs "truly terminal."
+6. **`packages/workflow/src/cli.ts`** — entrypoint (`#!/usr/bin/env node`), lines 1–60. Fix 2 inserts a build-freshness check near the top of the entry function, before any command dispatch.
+7. **`CLAUDE.md`** — repo conventions.
 
-1. **Spawn race (Finding 7)** — engine declares `hld` agent dead 88ms after spawn. claude-code's PTY attach takes >100ms; engine sees `status=spawning, activity=exited` and treats it as terminal. The agent actually produced `hld.md` successfully *after* the engine gave up.
-2. **Build freshness (Finding 6)** — `aow` silently runs stale `dist/` after a `git pull`. Phase 3.8 was invisible until manual rebuild.
-3. **Zombie sessions (Finding 8)** — revision loop leaves prior-attempt tmux sessions orphaned. Up to 12 zombies per multi-step run.
+## The Bugs in Detail
 
-Fix #1 is the critical blocker — every multi-step workflow hits it intermittently. Fix #2 is a silent-failure UX trap. Fix #3 is cleanup quality.
+### Bug 1 (Finding 7) — Spawn race in completion-detector
 
-## Required reading (in order)
+`completion-detector.ts:96-101`:
 
-1. **`docs/aow-dogfood-findings.md` §"Run 4"** — symptoms with timestamps and evidence (read the full Run 4 section, including the table and Findings 6/7/8).
-2. `packages/workflow/src/engine/step-runner.ts` and any `engine/completion-detector.ts` (or equivalent in `engine/`) — where session-status polling decides terminal.
-3. `packages/workflow/src/ao-client.ts` — `getSessionStatus` returns `{status, activity, lastActivityAt}`. The spawn-race classification uses these fields.
-4. `packages/core/src/lifecycle-state.ts` — canonical session states. Understand what `spawning`, `working`, `idle`, `terminated` mean and which are truly terminal.
-5. `packages/workflow/src/cli.ts` and `packages/aow/bin/aow.js` — where to add the build-freshness check.
+```typescript
+function isTerminalSnapshot(snapshot: SessionStatusSnapshot | null): boolean {
+  if (!snapshot) return true;
+  if (TERMINAL_STATUSES.has(snapshot.status)) return true;
+  if (snapshot.activity === "exited") return true;   // ← BUG
+  return false;
+}
+```
 
-## Fixes to land (priority order, all in one PR)
+`activity === "exited"` is the **default state for the first poll** of any freshly-spawned claude-code session — the PTY hasn't attached yet, so no process appears to be running. The engine immediately classifies the step as failed.
 
-### Fix 1 — Spawn-race: never declare `spawning` terminal
+Run-4 evidence: `ust-6` was created at `2026-05-22T03:36:30.565Z`, marked failed at `03:36:30.653Z` (**88ms** later). The agent then continued running and produced a complete `hld.md` (244 lines) — proving the agent was never actually dead, just slow to attach.
 
-**Symptom.** Session created at T+0, marked failed at T+88ms with `status='spawning', activity='exited'`. The agent then ran successfully and produced its outputs, but the engine had already aborted the step.
+### Bug 2 (Finding 6) — Stale dist after `git pull`
 
-**Behavior to implement:**
-- In the step-runner's session-polling loop, the terminal-classification check must NOT mark a session failed while its `status` is `spawning`, regardless of `activity` value. `spawning` is a transient setup state — `activity=exited` during this window means "PTY hasn't attached yet," not "agent died."
-- A spawned session is only eligible for terminal classification once it has transitioned to a post-spawn status (`working`, `idle`, `needs_input`, `done`, or a true terminal like `terminated`).
-- Defense-in-depth: also apply a minimum grace period of **30s** from `started_at` before declaring exit-without-outputs, even on non-`spawning` statuses. Catches edge cases where the status transitions in <30s but the agent is still bootstrapping.
-- Preserve the existing "agent done + idle ≥30s but no outputs" check — that one is correct and should still fail the step.
+`packages/workflow/dist/` is built by `tsc`. `aow` runs the dist. After `git pull` lands new source, `dist/` is unchanged until the user runs `pnpm --filter @aoagents/ao-workflow build`. There's no warning. Phase 3.8 was invisible in production until rebuilt — exactly what happened to us on the first re-dogfood attempt.
 
-**Tests to add:**
-- Session reports `status='spawning', activity='exited'` for 5 consecutive polls → step does NOT fail; runner keeps polling.
-- Session reports `status='working'` then transitions to `terminated` with no outputs after >30s → step fails (existing behavior preserved).
-- Session reports `status='idle'` with no outputs at T+10s → step does NOT fail (within grace).
-- Session reports `status='idle'` with no outputs at T+45s → step fails (past grace).
-- Session reports `status='working'` then produces outputs at T+5s → step completes.
+### Bug 3 (Finding 8) — Zombie sessions per revision
 
-### Fix 2 — Build-freshness warning
+`step-runner.ts:180-193`:
 
-**Symptom.** User pulls a PR that ships compiled-from-source fixes; runs `aow run`; nothing changes because `packages/workflow/dist/` still holds the pre-PR build. No warning, no error.
+```typescript
+if (canRevise) {
+  await writeCitationFeedback(ctx.runDir, step.id, attempts + 1, lintReport);
+  await updateStep(ctx.runDir, step.id, (prev) => ({
+    ...prev,
+    status: "pending",
+    failure_reason: undefined,
+    current_attempt: undefined,
+    history: [...(prev.history ?? []), attemptRecord],
+  }));
+  log.warn(`[${step.id}] citation lint failed: ...; revising (attempt ${attempts}/${maxRevisions})`);
+  return { kind: "revise" };
+}
+```
 
-**Behavior to implement:**
-- In `packages/workflow/src/cli.ts` (top of the entry function, before any command dispatch), compute:
-  - `srcLatest = max(mtime of all packages/workflow/src/**/*.ts)`
-  - `distLatest = max(mtime of all packages/workflow/dist/**/*.js)`
-- If `srcLatest > distLatest`, print a yellow warning to stderr:
-  ```
-  warn  workflow source is newer than dist (src: <iso>, dist: <iso>)
-  warn  run: pnpm --filter @aoagents/ao-workflow build
-  ```
-- Do NOT block execution. Warning only.
-- Skip the check if `dist/` doesn't exist (fresh checkout — let the existing import errors surface naturally).
-- Skip the check if running from a published npm install (no `src/` directory next to `dist/`).
+The just-failed `sessionId` is recorded in `attemptRecord` then forgotten. The next attempt spawns a fresh session at `step-runner.ts:~98-102`. The prior session's tmux pane is never killed. After 4 steps × up to 3 attempts = up to 12 zombies per workflow run.
 
-**Tests to add:**
-- Mock filesystem: src newer than dist → warning emitted to stderr.
-- src older than dist → no warning.
-- dist missing → no warning, no crash.
-- src missing (published install) → no warning, no crash.
+## Files to Modify
 
-### Fix 3 — Revision loop kills prior session
+### 1. `packages/workflow/src/completion-detector.ts` (Fix 1)
 
-**Symptom.** Each revision attempt spawns a fresh `ust-N`. The prior attempt's session lives on in tmux forever. After 4 steps × 3 attempts = up to 12 zombies.
+**Change `isTerminalSnapshot` (line 96) to:**
 
-**Behavior to implement:**
-- In the revision-loop spawn site (`engine/citation-step.ts` or wherever attempt N+1 is launched), before spawning the new session, call `killSession(ctx, priorSessionId, 'auto_cleanup')` on the just-failed attempt's session.
-- Use the existing `killSession` helper from `ao-client.ts` — already supports a kill reason.
-- Best-effort: if the kill fails (session already gone), log a debug-level message and continue.
-- The branch + worktree are preserved (that's AO's concern). We only free the tmux session.
+```typescript
+const POST_SPAWN_STATUSES = new Set([
+  "working", "idle", "needs_input", "stuck", "detecting", "done", "terminated",
+]);
 
-**Tests to add:**
-- Two-attempt revision: after spawn of attempt 2, `killSession` was called with attempt 1's session-id and reason `auto_cleanup`.
-- Kill failure is swallowed: if `killSession` throws, the new spawn still proceeds.
-- Single-attempt success path: no kill is called (no prior session).
+function isTerminalSnapshot(
+  snapshot: SessionStatusSnapshot | null,
+  startedAt: number,
+  spawnGraceMs: number,
+): boolean {
+  if (!snapshot) {
+    // Session disappearing entirely IS terminal — but not during grace window
+    // (it may simply not be registered yet).
+    return Date.now() - startedAt >= spawnGraceMs;
+  }
+  if (TERMINAL_STATUSES.has(snapshot.status)) return true;
 
-## Hard constraints
+  // Activity-based exit only counts if the session has transitioned past
+  // spawn-time setup. `activity === "exited"` while status is still
+  // `not_started` / `spawning` (legacy) means the PTY hasn't attached, not
+  // that the agent died.
+  if (snapshot.activity === "exited" && POST_SPAWN_STATUSES.has(snapshot.status)) {
+    return true;
+  }
 
-- Modify ONLY `packages/workflow/`. Do not touch core, cli, aow, plugins/, web. Exception: if Fix 2 needs a helper in `packages/aow/bin/aow.js`, that's allowed — but prefer doing it inside `packages/workflow/src/cli.ts`.
-- Strict TS, no `any`, per-file LOC cap 400.
-- All existing tests stay green. New tests added for each fix.
-- Open ONE PR targeting `feature/workflow-engine` with all 3 fixes. PR body lists each fix + its finding from `docs/aow-dogfood-findings.md`.
+  return false;
+}
+```
 
-## Acceptance
+**Add a constant for the grace window** near the existing constants (line 39):
+
+```typescript
+const DEFAULT_SPAWN_GRACE_MS = 30_000;
+```
+
+**Thread `spawnGraceMs` through `WaitForStepCompletionOptions`** (line 24) — optional, defaults to `DEFAULT_SPAWN_GRACE_MS`.
+
+**Update the polling loop** (line 58) — capture `startedAt = Date.now()` before the `for` loop (already done as `start`), and pass `start` + `spawnGraceMs` into `isTerminalSnapshot` at line 62.
+
+**Reasoning:**
+- `not_started` and legacy `spawning` are transient. Activity-based exit during them is meaningless.
+- Once the session has reached any post-spawn status, `activity === "exited"` IS a real signal — preserve that.
+- `snapshot === null` becoming terminal only after grace handles the race where the session ID isn't in AO's registry yet.
+- The 30s grace is a defense-in-depth backstop; the status-gating is the primary fix.
+
+### 2. `packages/workflow/src/engine/step-runner.ts` (Fix 3)
+
+**At lines 180–193 (the revision branch), capture the prior session ID before the new attempt spawns.** The new attempt is spawned by returning `{ kind: "revise" }`, which causes the outer loop in `engine.ts` to re-enter `runAgentStep`. So the kill needs to happen here, before returning:
+
+```typescript
+if (canRevise) {
+  await writeCitationFeedback(ctx.runDir, step.id, attempts + 1, lintReport);
+  await updateStep(ctx.runDir, step.id, (prev) => ({
+    ...prev,
+    status: "pending",
+    failure_reason: undefined,
+    current_attempt: undefined,
+    history: [...(prev.history ?? []), attemptRecord],
+  }));
+  // Free the failed attempt's tmux session. Branch + worktree are preserved
+  // for forensics — only the session is reclaimed. Best-effort.
+  await killSession(ctx.aoCtx, sessionId, "auto_cleanup").catch((err) => {
+    log.warn(`[${step.id}] failed to kill prior session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  log.warn(
+    `[${step.id}] citation lint failed: ${lintReport.errors.length} error(s); revising (attempt ${attempts}/${maxRevisions})`,
+  );
+  return { kind: "revise" };
+}
+```
+
+`killSession` is already imported (line ~20-30 of step-runner.ts uses it for timeout cleanup at line 139). No new imports needed.
+
+### 3. `packages/workflow/src/cli.ts` (Fix 2)
+
+**Add a new helper `warnIfBuildStale()` and call it at the top of the entry function** (the function that runs when `node dist/cli.js` is invoked — likely at the bottom of the file or in a `main()` wrapper):
+
+```typescript
+import { stat, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+async function warnIfBuildStale(): Promise<void> {
+  const here = dirname(fileURLToPath(import.meta.url)); // .../packages/workflow/dist
+  const pkgRoot = dirname(here);                         // .../packages/workflow
+  const srcDir = join(pkgRoot, "src");
+  const distDir = join(pkgRoot, "dist");
+
+  try {
+    const [srcLatest, distLatest] = await Promise.all([
+      latestMtime(srcDir, /\.ts$/),
+      latestMtime(distDir, /\.js$/),
+    ]);
+    if (srcLatest === null || distLatest === null) return;  // published install or no dist
+    if (srcLatest <= distLatest) return;
+    log.warn(
+      `workflow source is newer than dist (src: ${new Date(srcLatest).toISOString()}, dist: ${new Date(distLatest).toISOString()})`,
+    );
+    log.warn("run: pnpm --filter @aoagents/ao-workflow build");
+  } catch {
+    // Best effort — never block command execution on a freshness check.
+  }
+}
+
+async function latestMtime(dir: string, pattern: RegExp): Promise<number | null> {
+  let latest = 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const sub = await latestMtime(p, pattern);
+        if (sub !== null && sub > latest) latest = sub;
+      } else if (pattern.test(entry.name)) {
+        const s = await stat(p);
+        if (s.mtimeMs > latest) latest = s.mtimeMs;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return latest > 0 ? latest : null;
+}
+```
+
+**Call site:** at the top of the `main` async function (or wherever the commander program is awaited), invoke `await warnIfBuildStale();` BEFORE `program.parseAsync(argv)`. This way the warning prints before any command output.
+
+**Reasoning:** print to stderr via existing `log.warn`. Non-blocking. Returns `null` and silently skips if either tree is missing (published install or fresh checkout) — those failure modes are caught by other error paths.
+
+### 4. Tests to add
+
+Add to `packages/workflow/src/__tests__/completion-detector.test.ts` (create if missing):
+
+- **Spawn race not classified terminal:** `snapshot = { status: "not_started", activity: "exited", lastActivityAt: null }` at T+0 → `isTerminalSnapshot` returns `false`. Same snapshot at T+31s → returns `false` (status still pre-spawn, activity decision gated on status). Test confirms NO false-terminal during spawn race regardless of how long it takes.
+- **Real exit after spawn IS terminal:** `snapshot = { status: "working", activity: "exited", ... }` → returns `true` (post-spawn status + exited activity).
+- **Truly-dead session is terminal after grace:** `snapshot = null` at T+0 → returns `false` (within grace). Same at T+31s → returns `true`.
+- **End-to-end via `waitForStepCompletion`:** mock `getSessionStatus` to return `{status: "not_started", activity: "exited"}` for 3 polls, then `{status: "idle", activity: "idle"}` with outputs present → result is `completed`, NOT `failed`.
+
+Add to `packages/workflow/src/__tests__/cli.test.ts` (create if missing):
+
+- **Build stale warning:** mock `latestMtime` (or use a temp dir with carefully-set mtimes) so src > dist → `log.warn` called with "source is newer".
+- **Build fresh, no warning:** src <= dist → no warn.
+- **Missing dist:** `latestMtime(distDir, ...)` returns `null` → no warn, no throw.
+- **Missing src (published install):** same — no warn.
+
+Add to `packages/workflow/src/__tests__/integration/phase-3-9.integration.test.ts` (mirror the existing `phase-3-8.integration.test.ts`):
+
+- **Revision loop kills prior session:** mock `killSession` and force a citation lint failure on attempt 1. Assert `killSession` was called with the attempt-1 sessionId and reason `"auto_cleanup"`. Assert the new attempt then spawns a different sessionId.
+- **Kill failure is non-fatal:** `killSession` rejects → revision still proceeds; warning is logged.
+
+## Hard Constraints
+
+- Modify ONLY `packages/workflow/`. Do not touch core, cli, aow, plugins/, web.
+- Strict TS. No `any`. Per-file LOC cap 400.
+- All existing tests stay green. Add tests for each fix as described above.
+- One PR targeting `feature/workflow-engine` with all 3 fixes.
+- Use `git pull` (merge), not `git pull --rebase`, if you need to sync the base branch.
+
+## Acceptance — All Must Pass
 
 ```bash
 pnpm --filter @aoagents/ao-workflow build
-pnpm --filter @aoagents/ao-workflow test
-pnpm typecheck
+pnpm --filter @aoagents/ao-workflow test     # existing + new tests pass
+pnpm typecheck                                # whole repo
 ```
 
-Manual re-dogfood after merge (human runs this):
+Manual smoke (document in PR body; the human re-runs the real dogfood post-merge):
+
 ```bash
-rm -rf ~/aow-test-url-shortener/.workflow-state ~/aow-test-url-shortener/artifacts
-cd ~/aow-test-url-shortener && node /Users/aryangaurav/agent-orchestrator/packages/aow/bin/aow.js run workflow.yaml
-# expected: design completes (possibly 1-2 revisions), hld completes, impl starts.
-# only one zombie ust-* per step at any time.
+# 1. Fix 2: stale-dist warning fires.
+touch packages/workflow/src/cli.ts
+node packages/workflow/dist/cli.js --help   # expect: "warn  workflow source is newer than dist ..."
+
+# 2. Rebuild → warning silenced.
+pnpm --filter @aoagents/ao-workflow build
+node packages/workflow/dist/cli.js --help   # no warning
 ```
 
-## When done
+## When Done
 
-1. Verify acceptance.
-2. Commit: `feat(workflow): phase 3.9 — fix spawn race, build freshness, zombie sessions`
+1. Verify all acceptance.
+2. Commit: `feat(workflow): phase 3.9 — fix spawn race + build freshness + zombie sessions`
 3. Push.
 4. PR: `gh pr create --base feature/workflow-engine --title 'feat(workflow): phase 3.9 — fix spawn race + build freshness + zombie sessions'`
-5. PR body: each fix + the finding it resolves.
+5. PR body should:
+   - List each fix and the finding from `docs/aow-dogfood-findings.md` it resolves (Findings 6, 7, 8)
+   - Confirm acceptance commands run green
+   - Paste the Fix 2 manual smoke output (stale warning before, silent after)
+   - Note: real dogfood verification is run by the human post-merge, not by the worker
 
-## Out of scope
+## Out of Scope
 
-- Fixes inside AO core (lifecycle-state, session-manager).
+- Fixes inside AO core (`lifecycle-state.ts`, `session-manager.ts`).
 - Publishing `@aoagents/aow` to npm.
-- The `hld`-step-specific behavior (it was a victim of the spawn race, not a broken step).
-- New citation-linter rules.
-- Any file outside `packages/workflow/` (except optional 1-line tweak to `packages/aow/bin/aow.js` for Fix 2).
+- New citation-linter rules or resolver behavior.
+- The `hld`-step-specific prompt or fixture content.
+- Any file outside `packages/workflow/`.
