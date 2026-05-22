@@ -291,12 +291,19 @@ export function matchClaim(claim: string, sectionContent: string): ClaimMatch {
     return { found: false, match_kind: null, confidence: 0.0 };
   }
   const lcContent = sectionContent.toLowerCase();
+  const sectionTokens = tokenize(sectionContent);
   let matched = 0;
   for (const t of tokens) {
-    if (lcContent.includes(t)) matched++;
+    if (lcContent.includes(t)) {
+      matched++;
+      continue;
+    }
+    if (sectionTokens.some((s) => s.length >= 4 && (s.startsWith(t) || t.startsWith(s)))) {
+      matched++;
+    }
   }
   const confidence = matched / tokens.length;
-  if (matched === tokens.length && confidence >= 0.5) {
+  if (confidence >= 0.5) {
     return { found: true, match_kind: "token_overlap", confidence };
   }
   return { found: false, match_kind: null, confidence: 0.0 };

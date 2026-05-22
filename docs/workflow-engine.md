@@ -1295,6 +1295,38 @@ other extensions fall through to the existing behavior: a file-only
 citation (no `#fragment`) still works; a `#fragment` against a
 non-supported language returns `section_not_found`.
 
+### 17.0.1 Claim matching tiers (Phase 3.11)
+
+When a citation carries `claim="..."`, the resolver scores it against
+the cited section's body via `matchClaim`, returning one of three
+tiers (first hit wins, short-circuit):
+
+1. **`exact_substring`** (confidence `1.0`) — the claim string is a
+   verbatim substring of the section body.
+2. **`normalized_substring`** (confidence `0.85`) — both sides are
+   lowercased and whitespace-collapsed, and the normalized claim is a
+   substring of the normalized section.
+3. **`token_overlap`** (confidence `matched / total`, accepted at
+   `≥ 0.5`) — the claim is tokenized into load-bearing words (length
+   ≥ 4, non-stopword, lowercase, split on non-alphanumerics). A claim
+   token counts as matched when it appears as a substring in the
+   lowercased section content, OR when some section token (extracted
+   with the same rule) shares a **4-character minimum prefix** with
+   the claim token in either direction (`section.startsWith(claim)`
+   OR `claim.startsWith(section)`). The 4-character floor is critical
+   — without it short fragments like `set` would match `setup`,
+   `setIfAbsent`, and other noise.
+
+The bidirectional prefix tolerance is what lets `generates` match
+`generate`, `routes` match `route` / `routing`, and `lookup` match
+`look` / `looking` — common surface-form differences when an agent
+paraphrases a section it just read. The 50% threshold means at least
+half of the claim's load-bearing tokens must appear in the section
+(literally or via prefix) for the citation to validate; anything below
+returns `found: false`. Tier 3 hits with confidence `< 0.7` still
+surface as a `claim_low_confidence` warning at the engine layer (see
+`engine/citation-step.ts`) so reviewers can spot weak paraphrases.
+
 ### 17.1 Resolver Script — `.ao/aow-ref`
 
 The engine writes a small Node script into each agent's worktree at
