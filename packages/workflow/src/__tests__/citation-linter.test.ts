@@ -115,6 +115,24 @@ describe("lintStepCitations — claim handling", () => {
     ).toBe(true);
   });
 
+  it("token_overlap with confidence in [0.5, 0.7) emits warning, NOT error", async () => {
+    // Regression for Phase 3.11 post-merge bug: claim_low_confidence was
+    // emitted as error when confidence < 0.7. The match itself is valid
+    // (resolver returned found=true); low confidence is informational.
+    // Run 7 dogfood failed tests step on confidence 0.57/0.67.
+    const s = newScratch();
+    const out = writeOutput(
+      s.artifactsDir,
+      "plan.md",
+      `# Plan\n<!-- ref: design.md#auth-flow claim="bcrypt factor encrypted handshake" -->\n`,
+    );
+    const report = await lintStepCitations(baseInputs(s, [out]));
+    expect(report.errors).toEqual([]);
+    const lowConf = report.warnings.find((w) => w.code === "claim_low_confidence");
+    expect(lowConf).toBeDefined();
+    expect(lowConf?.kind).toBe("warning");
+  });
+
   it("claim that does not match → claim_mismatch error", async () => {
     const s = newScratch();
     const out = writeOutput(

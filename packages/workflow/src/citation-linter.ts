@@ -228,17 +228,17 @@ async function lintCitation(
   }
   const match = claimResp.claim_match;
   if (match && match.found && match.match_kind === "token_overlap") {
-    const isError = match.confidence < CLAIM_LOW_CONFIDENCE_THRESHOLD;
     findings.push({
-      kind: isError ? "error" : "warning",
+      kind: "warning",
       code: "claim_low_confidence",
       outputFile: relOutput,
       ref: cite.refString,
       claim: cite.claim,
       message: `Claim matched via token_overlap with confidence ${match.confidence.toFixed(2)}`,
-      detail: isError
-        ? `confidence < ${CLAIM_LOW_CONFIDENCE_THRESHOLD}`
-        : `confidence >= ${CLAIM_LOW_CONFIDENCE_THRESHOLD} (soft warning)`,
+      detail:
+        match.confidence < CLAIM_LOW_CONFIDENCE_THRESHOLD
+          ? `confidence < ${CLAIM_LOW_CONFIDENCE_THRESHOLD} (review recommended)`
+          : `confidence >= ${CLAIM_LOW_CONFIDENCE_THRESHOLD}`,
     });
   }
   return findings;
