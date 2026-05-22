@@ -365,3 +365,83 @@ Lower-priority than Finding 9 (cosmetic, not blocking). Triage in Phase 3.11.
 The engine now runs a 4-step real software workflow to **75% completion automatically**, with a working build at the end. The remaining failure is a single resolver limitation (code-symbol anchors) — a contained ~half-day fix. Post-fix, the workflow should reach 100%.
 
 Estimated effort: 4 hours implementation + 1 hour docs + 1 hour re-dogfood. Brief ships as `.workflow-bootstrap/phase-3.10-prompt.md`.
+---
+
+## Run 6 — Post Phase 3.10 (2026-05-23)
+
+Run id: `wf-url-shortener-build-20260522T222945`. All Phase 3.8/3.9/3.10 fixes active.
+
+### Outcome
+
+| Step | Status | Attempts | Notes |
+|---|---|---|---|
+| design | ✅ completed | 1 | first-try pass — no lint failures |
+| hld | ✅ completed | 2 | revised once |
+| impl | ❌ failed | 3 | same 4 `claim_mismatch` errors every attempt |
+| tests | — pending | 0 | never reached |
+
+**Phase 3.10 verification status: unverified.** The tests step (the one Phase 3.10 targeted) never ran because impl failed first on a different, pre-existing issue.
+
+### Finding 11 — `matchClaim` requires 100% token coverage; no stemming
+
+The 4 errors that killed `impl`:
+
+```
+[claim_mismatch] src/Shortener.ts:hld.md#shortener
+[claim_mismatch] src/HashRing.ts:hld.md#hashring
+[claim_mismatch] src/Shortener.ts:design.md#shortcode-encoding
+[claim_mismatch] src/Shortener.ts:design.md#id-generation-and-collisions
+```
+
+These are NOT `section_not_found` (Phase 3.10 territory) — they're `claim_mismatch`. The section was found; the claim text didn't fuzzy-match it.
+
+**Reproduction** (deterministic):
+
+Section body (hld.md `### Shortener`, real text):
+
+> Orchestrates the write path: generate a random 7-char base62 code, ask the ring for the owning shard, attempt setIfAbsent, retry on collision up to 5 times. Also owns the read path: ask the ring for the shard, get the URL.
+
+Agent's claim (from `src/Shortener.ts`):
+
+> Shortener generates random 7-char base62 code, routes via ring, setIfAbsent with retry up to 5x; resolve does ring lookup + get.
+
+`matchClaim` returns `{ found: false, confidence: 0 }`. Why:
+
+- `parse.ts:117 matchClaim` tokenizes the claim, filters tokens to length ≥4 and non-stopword.
+- Tokens include `generates`, `routes`, `resolve`, `lookup`.
+- Section body has `generate`, `ask`, `attempt`, `get` — same meaning, different surface form.
+- The matcher rule at `parse.ts:136`: `if (matched === tokens.length && confidence >= 0.5)`. **Requires 100% of tokens to appear literally.** `generates` ≠ `generate` (no stem), `routes` ≠ `ring/shard` (no synonym), `lookup` not in body (semantic but not lexical).
+- One missing token → confidence falls below threshold → `found: false`.
+
+This is the fundamental problem: the citation contract assumes the agent will quote the upstream text. The agent naturally **paraphrases** when explaining what the code does. Paraphrase + strict-token-match = guaranteed mismatch.
+
+**Why earlier runs worked.** Past dogfood runs used claims that *quoted* requirements.md verbatim (e.g., "302-redirects to the original URL" — a direct quote). hld→impl naturally paraphrases more, because the agent is summarizing a design decision into a `// ref:` comment, not echoing it.
+
+**Suggested fixes (priority order):**
+
+1. **Tier-3 partial-match acceptance.** If `matched / tokens.length >= 0.6` (down from 1.0 implicit threshold), return `{ found: true, match_kind: "token_overlap", confidence }`. Today's 100% threshold rejects realistic paraphrase. The existing soft-warning at confidence ≥0.7 (`parse.ts` token_overlap path) already implies partial match is acceptable upstream — make it the success path.
+2. **Stemming.** Basic suffix-strip (`s`, `es`, `ed`, `ing`) so `generates` and `generate` collapse. Adds ~10 lines. Catches the most common false-mismatches.
+3. **Document the contract.** `docs/aow-guide.md` §3 should state plainly: "claims must contain ≥60% of the load-bearing tokens (≥4 chars, non-stopword) from the cited section." Today this is implicit and the agent doesn't know the rule.
+
+Without one of these, every realistic workflow will hit this on the impl or tests step — exactly what Run 6 shows.
+
+### Finding 10 follow-up — zombie sessions persist (still)
+
+End of Run 6: 3 active `ust` sessions (ust-17, ust-19, ust-22) + orchestrator. Phase 3.9 Fix 3 should have killed prior attempts; it didn't fully. Same finding as Run 5. Confirmed reproducible, not a transient.
+
+### Findings 7 + 1–5 status (regression check)
+
+- Spawn race (Finding 7, Phase 3.9): ✅ no spawn-race failures this run.
+- Revision loop (Fix 3, Phase 3.8): ✅ fired correctly on hld and impl.
+- Lint visibility (Fix 4, Phase 3.8): ✅ all 4 errors printed to stderr with claim text.
+- Run-id branch suffixes (Fix 5, Phase 3.8): ✅ branches like `aow-url-shortener-build-impl-3-wf-...`.
+- Code-symbol anchors (Phase 3.10): ⚠️ **untested** — never reached tests step.
+
+### Verdict for Phase 3.11
+
+Phase 3.10 must be re-verified in a future run, after the `claim_mismatch` blocker is removed. Two clean paths:
+
+- **Phase 3.11a (recommended):** loosen `matchClaim` to accept ≥60% token overlap. ~30 min implementation + tests. Re-dogfood immediately verifies both 3.10 and 3.11.
+- **Phase 3.11b (broader):** stemming + partial-match + a `--claim-strict` flag for workflows that want today's behavior. ~3 hours.
+
+Recommendation: ship 3.11a now, surface 3.11b only if 3.11a still produces too many false-passes on real workflows. Brief target: `.workflow-bootstrap/phase-3.11-prompt.md`.
