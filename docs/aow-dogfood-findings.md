@@ -111,3 +111,88 @@ Estimated work to ship-ready: blocker #1 ~half day in resolver + engine; blocker
 4. `[docs] document hops cap; surface warning in aow run output` (annoyance #2)
 5. `[engine] aow status should list active agent sessions for the current run` (friction)
 6. `[cli] add aow logs <step> as a shortcut for tmux attach to the step's session` (friction)
+
+---
+
+## Run summary — second attempt (post-workaround re-run)
+
+Workaround applied: copied `requirements.md` into `artifacts/` so the resolver could find it.
+
+**Outcome:** Run failed before any step started.
+
+### Blocker #3 — Engine reuses branch names; old worktree blocks re-spawn
+
+**Severity:** blocker for any re-run scenario.
+
+**What happened:**
+- I wiped `~/aow-test-url-shortener/.workflow-state/` and re-ran `aow run workflow.yaml`.
+- Engine generated branch name `aow-url-shortener-build-design-1` for the new `design` attempt #1.
+- `git worktree add` failed: branch is already in use by the prior failed run's worktree at `worktrees/ust-1`.
+- Run was marked `failed` with empty failed-step list (the spawn error fires before the step gets a chance to enter the `attempts` array — so `failed: []` in the result).
+
+**Root cause:** Engine doesn't know about (and doesn't clean up) AO session/worktree state owned by the previous run. The `.workflow-state/` wipe only clears engine-side bookkeeping; the AO project still has dangling sessions and worktrees from the prior run.
+
+**Workaround:** `node packages/ao/bin/ao.js session kill ust-1` (with the `session` subcommand, not the `kill` command — `kill` doesn't exist as a top-level command, which is a separate UX issue). After that the worktree is cleaned up and the branch is released.
+
+**Real fix:** when the engine starts a fresh run (no state.json), it should:
+1. Detect any existing AO sessions whose branch name matches the workflow's expected branch pattern.
+2. Either reclaim them, kill them with `auto_cleanup` reason, or error with `aow clean --hard` as the recovery hint.
+
+Alternatively, the branch name should incorporate the run-id so collisions are impossible across runs.
+
+### Annoyance #3 — `aow run` exit message says `failed: []` when spawn fails
+
+The run-level result shows `status: "failed", failed: []`. The empty `failed` array misleads — a step's spawn failure isn't recorded in the per-step state because the step never made it past the spawn boundary. User has to read the `error` log line above to know what actually failed.
+
+**Fix:** spawn errors should populate the failed array with the step id and a clear `failure_reason: "spawn_failed"`.
+
+### Annoyance #4 — `ao kill` doesn't exist; user must discover `ao session kill`
+
+**Severity:** nit (an AO CLI issue, not aow). But for aow users debugging dogfood, this is the obstacle they'll hit first.
+
+`ao --help` advertises `session  Session management (ls, kill, cleanup, restore, claim-pr)` but the `session` subcommand isn't intuitive when you're trying to kill ONE thing quickly. `ao kill <session-id>` would be the obvious shortcut.
+
+---
+
+## Sanity-check via direct linter invocation
+
+To prove the citation-resolution theory I ran:
+
+```javascript
+import { lintStepCitations } from '@aoagents/ao-workflow/dist/citation-linter.js';
+const r = await lintStepCitations({
+  artifactsDir: '/Users/aryangaurav/aow-test-url-shortener/artifacts',
+  workspacePath: '/Users/aryangaurav/aow-test-url-shortener',
+  stepId: 'design',
+  outputFiles: ['.../artifacts/design.md'],
+  trackedInputCount: 1,
+  resolverScriptPath: '.../packages/workflow/dist/resolver/script.js',
+});
+```
+
+**Before workaround:** 11 errors, all `File not found: requirements.md` + 1 warning `Step has 11 hops in ref-hops.jsonl (limit 4)`.
+
+**After staging `requirements.md` into `artifacts/`:** 1 error (`Claim did not match section "out-of-scope" in requirements.md`) + 7 warnings. The single remaining error is a slug-mismatch (agent cited `out-of-scope`, heading is `Out of scope` → slug becomes `out-of-scope` either way? need to investigate) — but it's a 10× reduction. Hypothesis confirmed: the resolver IS the blocker.
+
+### Annoyance #5 — `citation-resolver-script.js` doesn't exist at the expected path
+
+While reproducing the lint manually, I first hit `Cannot find module '...dist/citation-resolver-script.js'`. The actual script is at `dist/resolver/script.js`. The error originates from the linter trying to spawn the resolver subprocess with the wrong filename embedded.
+
+Looking at the code: the linter takes `resolverScriptPath` as input, so this isn't a hard-coded bug; the caller (engine) must be passing the right path. The error I hit was from an incorrect default I guessed when calling the linter directly. **Not a real bug** — withdrawing as a finding. (Recording the diagnostic to spare the next person.)
+
+---
+
+## Updated verdict
+
+Three blockers, five annoyances surfaced from two run attempts of one realistic workflow. The blockers are concentrated in the **citation/revision/cleanup** layer; the core orchestration is sound. The engine demonstrably:
+
+- Spawns agents into isolated worktrees ✓
+- Detects completion via the two-check contract ✓
+- Verifies output files exist and hashes them ✓
+- Runs the citation linter as a gate ✓
+- Persists rich state for post-mortem ✓
+
+But none of the workflow-level guarantees the design promises (revision loops, cross-run cleanup, inputs-aware citation resolution) work yet on a real workflow.
+
+**Recommendation:** before extending the engine or doing more dogfood, fix the three blockers in this order: #1 (resolver inputs-awareness), #2 (revision loop), #3 (cross-run cleanup). They are independent and small (estimated ~1 day total).
+
