@@ -196,3 +196,63 @@ But none of the workflow-level guarantees the design promises (revision loops, c
 
 **Recommendation:** before extending the engine or doing more dogfood, fix the three blockers in this order: #1 (resolver inputs-awareness), #2 (revision loop), #3 (cross-run cleanup). They are independent and small (estimated ~1 day total).
 
+---
+
+## Run summary — third attempt (fresh agent run, with workaround)
+
+State wiped, old session killed, `requirements.md` still staged in `artifacts/`. Goal: confirm blocker #1's workaround actually unblocks the design step end-to-end, and surface any *new* issues.
+
+**Outcome:** Run failed at step 1 (design). One lint error, citations_invalid. Engine aborted, no revision.
+
+### Confirmed: blocker #1 workaround works partially
+
+A fresh claude-code instance, never having seen the prior run, produced design.md with 11 citations. The linter found only **1 error** this time (down from 11). All 10 file-found citations passed. The workaround (staging `requirements.md` into `artifacts/`) does unblock the path-resolution failure.
+
+### New finding — slug-mismatch on headings
+
+The remaining error:
+```
+Claim did not match section "out-of-scope" in requirements.md
+```
+
+`requirements.md` has the heading `## Out of scope`. The agent generated the slug `out-of-scope` (lowercase, dashes — the most common Markdown slug convention, used by GitHub and most static-site generators). The linter's resolver evidently uses a different slug derivation.
+
+**To investigate:** what slug does the resolver expect? Looking at `packages/workflow/src/resolver/script.ts` would tell us. If the resolver expects `out_of_scope` or `outOfScope` or literal `Out of scope`, it diverges from every Markdown convention agents would naturally use.
+
+**Likely fix:** the resolver should accept multiple slug forms (GitHub-style at minimum: lowercase, spaces → dashes, strip punctuation). Or the prompt should document the exact slug rule.
+
+### Confirmed: blocker #2 still applies
+
+The 1 lint error caused an immediate run abort. No second attempt, no feedback injection. `max_revisions: 3` is in the schema but never consulted.
+
+---
+
+## Verdict (final, after 3 runs)
+
+Three runs, three failures, all at step 1 (design). Run-by-run failure mode:
+
+| Run | Outcome | Failure surface |
+|-----|---------|----------------|
+| 1   | failed | 11 lint errors (file-not-found, blocker #1) |
+| 2   | failed | spawn — branch/worktree reuse (blocker #3) |
+| 3   | failed | 1 lint error (slug-mismatch, narrow case of blocker #1's friend) + no revision (blocker #2) |
+
+**The pattern is clear.** The orchestration substrate works; the gate enforcement is too strict for real workflows. Specifically:
+
+- Path resolution doesn't know about `inputs:` aliasing → fails with cross-directory inputs.
+- Slug derivation doesn't match conventional Markdown slug rules → fails on Heading-with-spaces.
+- A single gate failure aborts instead of looping → the revision-loop value prop is currently absent.
+
+Each failure is one tractable bugfix. None require redesign. Stopping the dogfood here is correct: more runs would just re-confirm the same three findings.
+
+### Fixes to ship before next dogfood (priority order)
+
+1. **Resolver: inputs-awareness.** Citation paths should resolve via the step's `inputs:` map first, falling back to filesystem. ~half day.
+2. **Resolver: slug compatibility.** Accept GitHub-style slugs (the conventional default). Document the rule. ~1 hour.
+3. **Engine: citations_invalid → revision.** Route lint failures into the existing `max_revisions` loop with `LintReport.errors` injected as feedback. ~2 hours.
+4. **Engine: persist `LintReport` into state.json.** ~1 hour.
+5. **Engine: cross-run worktree cleanup.** Detect dangling sessions on fresh-run startup and reclaim or error with a recovery hint. ~half day.
+
+Combined: ~1.5 engineer-days. After that, re-run dogfood and expect to surface a *different* class of bugs (probably in `hld` or `impl` stages).
+
+
