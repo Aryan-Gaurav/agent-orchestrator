@@ -4,17 +4,17 @@
 // handshake. The runner just sequences those pieces and updates state.
 
 import { isAbsolute, join, resolve } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
 
 import type { AoContext } from "../ao-client.js";
 import { getSessionWorkspacePath, killSession, spawnAgentSession } from "../ao-client.js";
-import { getBundledResolverScriptPath, installResolverScript } from "./workspace-setup.js";
-import { hashFile } from "../artifact-store.js";
+import { installResolverScript } from "./workspace-setup.js";
 import {
-  lintStepCitations,
-  type CitationFinding,
-  type LintReport,
-} from "../citation-linter.js";
+  logLintErrors,
+  runCitationLint,
+  toPersistedReport,
+  writeCitationFeedback,
+} from "./citation-step.js";
+import { hashFile } from "../artifact-store.js";
 import { waitForStepCompletion } from "../completion-detector.js";
 import { enterGate, readFeedback } from "../approvals.js";
 import { RevisionLimitExceededError } from "../errors.js";
@@ -37,6 +37,7 @@ import type {
 
 const DEFAULT_TIMEOUT_MINUTES = 60;
 const DEFAULT_MAX_REVISIONS = 5;
+const DEFAULT_AGENT_MAX_REVISIONS = 3;
 
 export interface StepRunContext {
   workflow: WorkflowDefinition;
@@ -52,6 +53,7 @@ export interface StepRunContext {
 export type StepRunOutcome =
   | { kind: "completed" }
   | { kind: "awaiting_approval" }
+  | { kind: "revise" }
   | { kind: "failed"; reason: string };
 
 export async function runAgentStep(
@@ -77,7 +79,7 @@ export async function runAgentStep(
     }
   }
 
-  const branch = step.branch ?? `aow-${ctx.workflow.id}-${step.id}-${attempts}`;
+  const branch = step.branch ?? `aow-${ctx.workflow.id}-${step.id}-${attempts}-${ctx.state.run_id}`;
   const startedAt = new Date().toISOString();
 
   await updateStep(ctx.runDir, step.id, (prev) => ({
@@ -151,23 +153,54 @@ export async function runAgentStep(
     hash: o.hash,
   }));
 
-  const lintReport = await runCitationLint(ctx, step, workspacePath, result.outputs.map((o) => o.path));
+  const lintReport = await runCitationLint({
+    step,
+    artifactsDir: ctx.artifactsDir,
+    workspacePath,
+    outputAbsPaths: result.outputs.map((o) => o.path),
+    inputs: inputs.map((i) => ({ name: i.name, absPath: i.absPath })),
+  });
   if (lintReport.errors.length > 0) {
-    await writeCitationFeedback(ctx, step.id, attempts + 1, lintReport);
+    const persistedReport = toPersistedReport(lintReport);
+    const maxRevisions = step.max_revisions ?? DEFAULT_AGENT_MAX_REVISIONS;
+    const canRevise = attempts < maxRevisions;
+
+    logLintErrors(step.id, lintReport);
+
+    const attemptRecord = {
+      session_id: sessionId,
+      branch,
+      started_at: startedAt,
+      completed_at: completedAt,
+      inputs: inputs.map((i) => ({ name: i.name, path: i.absPath, hash: i.hash })),
+      outputs: outputArtifacts,
+      lint_report: persistedReport,
+    };
+
+    if (canRevise) {
+      await writeCitationFeedback(ctx.runDir, step.id, attempts + 1, lintReport);
+      await updateStep(ctx.runDir, step.id, (prev) => ({
+        ...prev,
+        status: "pending",
+        failure_reason: undefined,
+        current_attempt: undefined,
+        history: [...(prev.history ?? []), attemptRecord],
+      }));
+      log.warn(
+        `[${step.id}] citation lint failed: ${lintReport.errors.length} error(s); revising (attempt ${attempts}/${maxRevisions})`,
+      );
+      return { kind: "revise" };
+    }
+
     await updateStep(ctx.runDir, step.id, (prev) => ({
       ...prev,
       status: "failed",
       failure_reason: "citations_invalid",
-      current_attempt: {
-        session_id: sessionId,
-        branch,
-        started_at: startedAt,
-        completed_at: completedAt,
-        inputs: inputs.map((i) => ({ name: i.name, path: i.absPath, hash: i.hash })),
-        outputs: outputArtifacts,
-      },
+      current_attempt: attemptRecord,
     }));
-    log.error(`[${step.id}] citation lint failed: ${lintReport.errors.length} error(s)`);
+    log.error(
+      `[${step.id}] citation lint failed: ${lintReport.errors.length} error(s) after ${attempts} attempt(s); giving up`,
+    );
     return { kind: "failed", reason: "citations_invalid" };
   }
 
@@ -176,7 +209,7 @@ export async function runAgentStep(
     status: "completed",
     failure_reason: undefined,
     warnings: lintReport.warnings.length > 0
-      ? lintReport.warnings.map(formatFinding)
+      ? lintReport.warnings.map(formatFindingShort)
       : undefined,
     current_attempt: {
       session_id: sessionId,
@@ -313,56 +346,7 @@ async function recordFailedAttempt(
   }));
 }
 
-async function runCitationLint(
-  ctx: StepRunContext,
-  step: AgentStep,
-  workspacePath: string | null,
-  outputAbsPaths: string[],
-): Promise<LintReport> {
-  if (!workspacePath) {
-    // No workspace means resolver was never installed; skip lint silently —
-    // resolver-script availability is logged as a warning earlier in this run.
-    return { errors: [], warnings: [] };
-  }
-  const trackedInputCount = Object.keys(step.inputs ?? {}).length;
-  try {
-    return await lintStepCitations({
-      artifactsDir: ctx.artifactsDir,
-      workspacePath,
-      stepId: step.id,
-      outputFiles: outputAbsPaths,
-      trackedInputCount,
-      resolverScriptPath: getBundledResolverScriptPath(),
-    });
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    log.warn(`[${step.id}] citation linter crashed: ${reason}`);
-    return { errors: [], warnings: [] };
-  }
-}
-
-function formatFinding(f: CitationFinding): string {
+function formatFindingShort(f: { code: string; outputFile: string; ref?: string; message: string }): string {
   const ref = f.ref ? `:${f.ref}` : "";
   return `- [${f.code}] ${f.outputFile}${ref} — ${f.message}`;
-}
-
-async function writeCitationFeedback(
-  ctx: StepRunContext,
-  stepId: string,
-  nextAttempt: number,
-  report: LintReport,
-): Promise<void> {
-  const sections: string[] = [
-    "Citation linter rejected this attempt. Fix every error below and re-run.",
-    "",
-    "Errors (must fix):",
-    ...report.errors.map(formatFinding),
-  ];
-  if (report.warnings.length > 0) {
-    sections.push("", "Warnings (non-blocking):", ...report.warnings.map(formatFinding));
-  }
-  const dir = join(ctx.runDir, "feedback");
-  await mkdir(dir, { recursive: true });
-  const file = join(dir, `${stepId}-attempt-${nextAttempt}.md`);
-  await writeFile(file, sections.join("\n") + "\n", "utf8");
 }

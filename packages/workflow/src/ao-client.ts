@@ -202,3 +202,19 @@ export async function getSessionWorkspacePath(
   if (!session) return null;
   return session.workspacePath ?? null;
 }
+
+export interface SessionSummary {
+  id: SessionId;
+  branch: string | null;
+}
+
+/**
+ * List AO sessions for the project. Used by `aow clean` to find sessions
+ * whose branch matches a workflow's `aow-*` pattern.
+ */
+export async function listProjectSessions(
+  ctx: AoContext,
+): Promise<SessionSummary[]> {
+  const sessions = await ctx.sm.list(ctx.projectId);
+  return sessions.map((s) => ({ id: s.id, branch: s.branch ?? null }));
+}

@@ -51,6 +51,13 @@ export interface CitationFinding {
   detail?: string;
 }
 
+export interface LintInputAlias {
+  /** Logical name used in citation paths (often equals basename). */
+  name: string;
+  /** Absolute path on disk that `name` aliases. */
+  path: string;
+}
+
 export interface LintInputs {
   artifactsDir: string;
   workspacePath: string;
@@ -60,6 +67,12 @@ export interface LintInputs {
   resolverScriptPath: string;
   /** Optional override for the per-subprocess timeout (default 15s). */
   resolverTimeoutMs?: number;
+  /**
+   * Step + workflow inputs. The resolver matches a citation's file path
+   * against these by name OR basename before falling back to the artifacts
+   * directory. See docs/workflow-engine.md §17.
+   */
+  inputs?: LintInputAlias[];
 }
 
 export interface LintReport {
@@ -82,6 +95,9 @@ async function invokeResolver(
     "--step-id",
     input.stepId,
   ];
+  if (input.inputs && input.inputs.length > 0) {
+    args.push("--inputs", JSON.stringify(input.inputs));
+  }
   if (claim !== undefined) {
     args.push("--claim", claim);
   }

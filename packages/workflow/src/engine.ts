@@ -166,6 +166,9 @@ async function executeLoop(args: ExecuteLoopArgs): Promise<RunState> {
         await markRunStatus(args.runDir, "failed");
         return await loadRunState(args.runDir);
       }
+      // outcome.kind === "completed" or "revise": loop back and pick next ready
+      // step. For "revise" the same step is now `pending` with attempts++ and
+      // its feedback file already written for the next spawn.
       continue;
     }
 

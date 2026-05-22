@@ -209,6 +209,44 @@ describe("lintStepCitations — hop log", () => {
   });
 });
 
+describe("lintStepCitations — inputs plumbing (Fix 1)", () => {
+  it("resolves a citation via the LintInputs.inputs alias when set", async () => {
+    const s = newScratch();
+    // Put requirements.md OUTSIDE the artifacts dir; the only way the
+    // citation `requirements.md#out-of-scope` can resolve is via the inputs
+    // alias.
+    const externalDir = mkdtempSync(join(tmpdir(), "aow-ext-"));
+    tmpDirs.push(externalDir);
+    writeFileSync(
+      join(externalDir, "requirements.md"),
+      "# R\n\n## Out of scope\nbody\n",
+      "utf8",
+    );
+    const out = writeOutput(
+      s.artifactsDir,
+      "plan.md",
+      `# Plan\n<!-- ref: requirements.md#out-of-scope claim="body" -->\n`,
+    );
+    const report = await lintStepCitations(
+      baseInputs(s, [out], {
+        inputs: [{ name: "requirements", path: join(externalDir, "requirements.md") }],
+      }),
+    );
+    expect(report.errors).toEqual([]);
+  });
+
+  it("without inputs alias, the same citation reports file_not_found", async () => {
+    const s = newScratch();
+    const out = writeOutput(
+      s.artifactsDir,
+      "plan.md",
+      `# Plan\n<!-- ref: requirements.md#out-of-scope claim="body" -->\n`,
+    );
+    const report = await lintStepCitations(baseInputs(s, [out]));
+    expect(report.errors.some((e) => e.code === "file_not_found")).toBe(true);
+  });
+});
+
 describe("lintStepCitations — subprocess timeout", () => {
   it("hung resolver script → finding with detail 'resolver timeout'", async () => {
     const s = newScratch();

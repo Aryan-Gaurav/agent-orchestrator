@@ -45,6 +45,7 @@ const agentStepSchema = z.object({
   outputs: z.record(artifactNameSchema, z.string().min(1)),
   timeout_minutes: z.number().positive().optional(),
   branch: z.string().min(1).optional(),
+  max_revisions: z.number().int().positive().optional(),
 });
 
 const approvalStepSchema = z.object({

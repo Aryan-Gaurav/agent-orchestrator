@@ -37,6 +37,8 @@ export interface AgentStep extends StepCommon {
   outputs: Record<string, string>;
   timeout_minutes?: number;
   branch?: string;
+  /** Max retry attempts when the citation linter rejects the output. Default 3. */
+  max_revisions?: number;
 }
 
 export interface ApprovalStep extends StepCommon {
@@ -119,6 +121,21 @@ export type ResolverResponse =
       available_sections?: string[];
     };
 
+export interface LintFinding {
+  kind: "error" | "warning";
+  code: string;
+  outputFile: string;
+  ref?: string;
+  claim?: string;
+  message: string;
+  detail?: string;
+}
+
+export interface PersistedLintReport {
+  errors: LintFinding[];
+  warnings: LintFinding[];
+}
+
 export interface AttemptRecord {
   session_id: string;
   branch: string;
@@ -126,6 +143,8 @@ export interface AttemptRecord {
   completed_at?: string;
   inputs: Artifact[];
   outputs: Artifact[];
+  /** Present when the citation linter ran on this attempt's outputs. */
+  lint_report?: PersistedLintReport;
 }
 
 export interface StepState {

@@ -5,19 +5,35 @@ import {
   mkdirSync,
   readFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 
 import { ArtifactStoreError } from "../errors.js";
 import { resolveArtifactPath } from "../artifact-store.js";
 import type {
-  Citation,
-  ClaimMatch,
   HopRecord,
   ResolverErrorKind,
   ResolverMatchKind,
   ResolverResponse,
 } from "../types.js";
+import {
+  extractOutgoingRefs,
+  extractSections,
+  matchClaim,
+  parseRef,
+  sectionBody,
+  slugify,
+} from "./parse.js";
 import { parseResolverResponse } from "./schema.js";
+
+// Re-export for callers that imported them from script.ts.
+export { matchClaim, parseRef, slugify } from "./parse.js";
+
+export interface ResolverInput {
+  /** Logical name as declared in the step's `inputs:` map (or workflow inputs). */
+  name: string;
+  /** Absolute path on disk that `name` aliases. */
+  path: string;
+}
 
 export interface ResolveArgs {
   ref: string;
@@ -25,165 +41,12 @@ export interface ResolveArgs {
   workspacePath: string;
   stepId: string;
   claim?: string;
-}
-
-interface ParsedRef {
-  file: string;
-  section: string | null;
-}
-
-const STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "that",
-  "this",
-  "from",
-  "into",
-  "have",
-  "has",
-  "are",
-  "was",
-  "were",
-  "but",
-  "not",
-  "you",
-  "your",
-  "use",
-  "uses",
-  "all",
-]);
-
-export function slugify(heading: string): string {
-  return heading
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-export function parseRef(ref: string): ParsedRef | null {
-  if (typeof ref !== "string" || ref.trim().length === 0) return null;
-  const trimmed = ref.trim();
-  if (trimmed.includes("\n") || trimmed.includes("\r")) return null;
-  const hashIdx = trimmed.indexOf("#");
-  if (hashIdx === -1) {
-    return { file: trimmed, section: null };
-  }
-  const file = trimmed.slice(0, hashIdx);
-  const section = trimmed.slice(hashIdx + 1);
-  if (file.length === 0) return null;
-  if (section.length === 0) return null;
-  return { file, section };
-}
-
-interface Section {
-  heading: string;
-  slug: string;
-  level: number;
-  startLine: number;
-  endLine: number;
-}
-
-function extractSections(content: string): Section[] {
-  const lines = content.split(/\r?\n/);
-  const headings: { heading: string; slug: string; level: number; line: number }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[i] ?? "");
-    if (m) {
-      const level = m[1].length;
-      const text = m[2];
-      headings.push({ heading: text, slug: slugify(text), level, line: i });
-    }
-  }
-  const sections: Section[] = [];
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i];
-    let end = lines.length;
-    for (let j = i + 1; j < headings.length; j++) {
-      if (headings[j].level <= h.level) {
-        end = headings[j].line;
-        break;
-      }
-    }
-    sections.push({
-      heading: h.heading,
-      slug: h.slug,
-      level: h.level,
-      startLine: h.line + 1,
-      endLine: end,
-    });
-  }
-  return sections;
-}
-
-const CITATION_RE =
-  /(?:<!--|\/\/|#)\s*ref:\s*([^\s"]+)(?:\s+claim="((?:[^"\\]|\\.)*)")?\s*(?:-->)?/g;
-
-function extractOutgoingRefs(content: string): Citation[] {
-  const out: Citation[] = [];
-  CITATION_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = CITATION_RE.exec(content)) !== null) {
-    const refStr = m[1];
-    const claim = m[2] ?? null;
-    const parsed = parseRef(refStr);
-    if (!parsed) continue;
-    out.push({
-      file: parsed.file,
-      section: parsed.section,
-      claim: claim === null ? null : claim.replace(/\\"/g, '"'),
-    });
-  }
-  return out;
-}
-
-function normalize(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/^[^\w]+|[^\w]+$/g, "")
-    .trim();
-}
-
-function tokenize(s: string): string[] {
-  return s
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
-}
-
-export function matchClaim(claim: string, sectionContent: string): ClaimMatch {
-  if (sectionContent.includes(claim)) {
-    return { found: true, match_kind: "exact_substring", confidence: 1.0 };
-  }
-  const nClaim = normalize(claim);
-  const nContent = normalize(sectionContent);
-  if (nClaim.length > 0 && nContent.includes(nClaim)) {
-    return { found: true, match_kind: "normalized_substring", confidence: 0.85 };
-  }
-  const tokens = tokenize(claim);
-  if (tokens.length === 0) {
-    return { found: false, match_kind: null, confidence: 0.0 };
-  }
-  const lcContent = sectionContent.toLowerCase();
-  let matched = 0;
-  for (const t of tokens) {
-    if (lcContent.includes(t)) matched++;
-  }
-  const confidence = matched / tokens.length;
-  if (matched === tokens.length && confidence >= 0.5) {
-    return { found: true, match_kind: "token_overlap", confidence };
-  }
-  return { found: false, match_kind: null, confidence: 0.0 };
-}
-
-function sectionBody(content: string, sec: Section): string {
-  const lines = content.split(/\r?\n/);
-  return lines.slice(sec.startLine, sec.endLine).join("\n");
+  /**
+   * Optional step/workflow inputs. When set, citations whose file matches an
+   * input by name or basename resolve to that input's absolute path, bypassing
+   * the artifacts-dir lookup. See docs/workflow-engine.md §17.
+   */
+  inputs?: ResolverInput[];
 }
 
 function isoNow(): string {
@@ -228,10 +91,27 @@ function makeError(
   return out;
 }
 
+function resolveInputAlias(
+  inputs: ResolverInput[] | undefined,
+  file: string,
+): string | null {
+  if (!inputs || inputs.length === 0) return null;
+  const fileBase = basename(file);
+  for (const input of inputs) {
+    if (input.name === file || input.name === fileBase) {
+      return isAbsolute(input.path) ? input.path : resolvePath(input.path);
+    }
+    if (basename(input.path) === file || basename(input.path) === fileBase) {
+      return isAbsolute(input.path) ? input.path : resolvePath(input.path);
+    }
+  }
+  return null;
+}
+
 export async function resolveCitation(
   args: ResolveArgs,
 ): Promise<ResolverResponse> {
-  const { ref, artifactsDir, workspacePath, stepId, claim } = args;
+  const { ref, artifactsDir, workspacePath, stepId, claim, inputs } = args;
   let response: ResolverResponse;
   let matchKind: ResolverMatchKind | null = null;
 
@@ -240,27 +120,32 @@ export async function resolveCitation(
     response = makeError(ref, "malformed_ref", `Could not parse ref string: ${ref}`);
   } else {
     let absPath: string;
-    try {
-      absPath = resolveArtifactPath(artifactsDir, parsed.file);
-    } catch (err) {
-      if (err instanceof ArtifactStoreError) {
-        response = makeError(
+    const inputAlias = resolveInputAlias(inputs, parsed.file);
+    if (inputAlias !== null) {
+      absPath = inputAlias;
+    } else {
+      try {
+        absPath = resolveArtifactPath(artifactsDir, parsed.file);
+      } catch (err) {
+        if (err instanceof ArtifactStoreError) {
+          response = makeError(
+            ref,
+            "outside_artifacts_dir",
+            `Path "${parsed.file}" escapes or is invalid relative to artifacts_dir: ${err.message}`,
+          );
+        } else {
+          throw err;
+        }
+        const count = appendHop(workspacePath, {
+          ts: isoNow(),
+          step_id: stepId,
           ref,
-          "outside_artifacts_dir",
-          `Path "${parsed.file}" escapes or is invalid relative to artifacts_dir: ${err.message}`,
-        );
-      } else {
-        throw err;
+          outcome: "error",
+          match_kind: null,
+        });
+        void count;
+        return response;
       }
-      const count = appendHop(workspacePath, {
-        ts: isoNow(),
-        step_id: stepId,
-        ref,
-        outcome: "error",
-        match_kind: null,
-      });
-      void count;
-      return response;
     }
 
     if (!existsSync(absPath)) {
@@ -308,7 +193,12 @@ export async function resolveCitation(
         }
       } else {
         const sections = extractSections(content);
-        const targetSlug = parsed.section.toLowerCase();
+        // Accept any of: GitHub-style slug ("out-of-scope"), the literal
+        // heading ("Out of scope"), or a legacy underscore form
+        // ("out_of_scope"). Normalize the fragment through slugify so we
+        // compare apples to apples; treat `_` as a word separator first so
+        // underscored variants normalize to the same slug.
+        const targetSlug = slugify(parsed.section.replace(/_/g, " "));
         const section = sections.find((s) => s.slug === targetSlug);
         if (!section) {
           response = makeError(
@@ -365,6 +255,38 @@ interface CliArgs {
   artifactsDir: string;
   workspacePath: string;
   stepId: string;
+  inputs?: ResolverInput[];
+}
+
+function parseInputsJson(raw: string): ResolverInput[] {
+  let parsedValue: unknown;
+  try {
+    parsedValue = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `--inputs must be a JSON array: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!Array.isArray(parsedValue)) {
+    throw new Error("--inputs must be a JSON array of {name, path} objects");
+  }
+  const out: ResolverInput[] = [];
+  for (const item of parsedValue) {
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      typeof (item as { name?: unknown }).name !== "string" ||
+      typeof (item as { path?: unknown }).path !== "string"
+    ) {
+      throw new Error("--inputs entries must be objects with string name and path");
+    }
+    const { name, path } = item as { name: string; path: string };
+    if (name.length === 0 || path.length === 0) {
+      throw new Error("--inputs entries must have non-empty name and path");
+    }
+    out.push({ name, path });
+  }
+  return out;
 }
 
 export function parseCliArgs(
@@ -374,13 +296,14 @@ export function parseCliArgs(
 ): CliArgs {
   const rest = argv.slice(2);
   if (rest.length === 0) {
-    throw new Error("Usage: aow-ref <ref> [--claim <text>] [--artifacts-dir <path>] [--workspace-path <path>] [--step-id <id>]");
+    throw new Error("Usage: aow-ref <ref> [--claim <text>] [--artifacts-dir <path>] [--workspace-path <path>] [--step-id <id>] [--inputs <json>]");
   }
   let ref: string | undefined;
   let claim: string | undefined;
   let artifactsDir: string | undefined;
   let workspacePath: string | undefined;
   let stepId: string | undefined;
+  let inputs: ResolverInput[] | undefined;
   for (let i = 0; i < rest.length; i++) {
     const tok = rest[i];
     if (tok === "--claim") {
@@ -391,6 +314,8 @@ export function parseCliArgs(
       workspacePath = rest[++i];
     } else if (tok === "--step-id") {
       stepId = rest[++i];
+    } else if (tok === "--inputs") {
+      inputs = parseInputsJson(rest[++i] ?? "");
     } else if (ref === undefined) {
       ref = tok;
     } else {
@@ -408,6 +333,7 @@ export function parseCliArgs(
     artifactsDir: artifactsDir ?? cwd,
     workspacePath: workspacePath ?? cwd,
     stepId: finalStepId,
+    inputs,
   };
 }
 

@@ -13,6 +13,7 @@ import { Command } from "commander";
 import { decideGate, readPendingGates } from "./approvals.js";
 import { createAoContext, type AoContext } from "./ao-client.js";
 import { ensureAowConfig } from "./cli/bootstrap.js";
+import { cleanCmd as runCleanCmd, type CleanCmdOpts } from "./cli/clean.js";
 import { ensureDaemonRunning } from "./cli/daemon-check.js";
 import { emitHopsForRun } from "./cli/render-hops.js";
 import { runWorkflow } from "./engine.js";
@@ -302,6 +303,15 @@ async function runsCmd(opts: GlobalOpts): Promise<void> {
   emitResult("runs", { runs: summaries });
 }
 
+export async function cleanCmd(runId: string | undefined, opts: CleanCmdOpts): Promise<void> {
+  applyGlobalOpts(opts);
+  const result = await runCleanCmd(runId, opts);
+  emitResult("clean", {
+    killed: result.killed,
+    skipped_count: result.skipped.length,
+  });
+}
+
 function buildProgram(): Command {
   const program = new Command();
   program
@@ -385,6 +395,15 @@ function buildProgram(): Command {
     .action(async (_cmdOpts: Record<string, unknown>, command) => {
       const merged = { ...command.parent?.opts() } as GlobalOpts;
       await runsCmd(merged);
+    });
+
+  program
+    .command("clean [run-id]")
+    .description("Kill AO sessions belonging to a workflow run (or all runs of this workflow)")
+    .option("--all", "kill every session for this workflow regardless of run id")
+    .action(async (runId: string | undefined, cmdOpts: Record<string, unknown>, command) => {
+      const merged = { ...command.parent?.opts(), ...cmdOpts } as CleanCmdOpts;
+      await cleanCmd(runId, merged);
     });
 
   return program;
