@@ -29,6 +29,7 @@ export interface WaitForStepCompletionOptions {
   timeoutMs: number;
   idleThresholdMs?: number;
   pollIntervalMs?: number;
+  spawnGraceMs?: number;
 }
 
 export type CompletionResult =
@@ -38,15 +39,29 @@ export type CompletionResult =
 
 const DEFAULT_IDLE_THRESHOLD_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
+export const DEFAULT_SPAWN_GRACE_MS = 30_000;
 
 const IDLE_ACTIVITY_STATES = new Set(["idle", "ready", "exited"]);
 const TERMINAL_STATUSES = new Set(["done", "terminated", "killed", "errored"]);
+// Statuses that indicate the session has progressed past spawn-time setup.
+// `activity === "exited"` only counts as a real exit signal once one of these
+// has been observed — before then, "exited" is just "PTY not yet attached".
+const POST_SPAWN_STATUSES = new Set([
+  "working",
+  "idle",
+  "needs_input",
+  "stuck",
+  "detecting",
+  "done",
+  "terminated",
+]);
 
 export async function waitForStepCompletion(
   opts: WaitForStepCompletionOptions,
 ): Promise<CompletionResult> {
   const idleThresholdMs = opts.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const spawnGraceMs = opts.spawnGraceMs ?? DEFAULT_SPAWN_GRACE_MS;
   const start = Date.now();
 
   let idleSince: number | null = null;
@@ -59,7 +74,7 @@ export async function waitForStepCompletion(
     const snapshot = await getSessionStatus(opts.ctx, opts.sessionId);
     const outputsExist = await allOutputsExist(opts.artifactsDir, opts.expectedOutputs);
 
-    if (isTerminalSnapshot(snapshot) && !outputsExist) {
+    if (isTerminalSnapshot(snapshot, start, spawnGraceMs) && !outputsExist) {
       return {
         kind: "failed",
         reason: failureReason(snapshot, opts.sessionId),
@@ -93,10 +108,23 @@ export async function waitForStepCompletion(
   }
 }
 
-function isTerminalSnapshot(snapshot: SessionStatusSnapshot | null): boolean {
-  if (!snapshot) return true;
+export function isTerminalSnapshot(
+  snapshot: SessionStatusSnapshot | null,
+  startedAt: number,
+  spawnGraceMs: number,
+): boolean {
+  if (!snapshot) {
+    // A vanished session is terminal — but during the spawn grace window the
+    // session may simply not be registered yet, so don't classify it as dead.
+    return Date.now() - startedAt >= spawnGraceMs;
+  }
   if (TERMINAL_STATUSES.has(snapshot.status)) return true;
-  if (snapshot.activity === "exited") return true;
+  // `activity === "exited"` is the default for the first poll of a fresh
+  // claude-code session — the PTY hasn't attached yet. Only treat it as a
+  // real exit signal once the session has reached a post-spawn status.
+  if (snapshot.activity === "exited" && POST_SPAWN_STATUSES.has(snapshot.status)) {
+    return true;
+  }
   return false;
 }
 

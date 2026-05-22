@@ -41,6 +41,8 @@ export interface RunWorkflowOptions {
   completionPollIntervalMs?: number;
   /** Override the completion-detector idle threshold (default 30s). */
   completionIdleThresholdMs?: number;
+  /** Override the completion-detector spawn grace window (default 30s). */
+  completionSpawnGraceMs?: number;
 }
 
 export interface RunResult {
@@ -103,6 +105,7 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<RunResult> 
     gatePollIntervalMs: opts.gatePollIntervalMs ?? GATE_POLL_INTERVAL_MS,
     completionPollIntervalMs: opts.completionPollIntervalMs,
     completionIdleThresholdMs: opts.completionIdleThresholdMs,
+    completionSpawnGraceMs: opts.completionSpawnGraceMs,
   });
 
   return summarize(runState, runDir, runId);
@@ -120,6 +123,7 @@ interface ExecuteLoopArgs {
   gatePollIntervalMs: number;
   completionPollIntervalMs?: number;
   completionIdleThresholdMs?: number;
+  completionSpawnGraceMs?: number;
 }
 
 async function executeLoop(args: ExecuteLoopArgs): Promise<RunState> {
@@ -158,6 +162,7 @@ async function executeLoop(args: ExecuteLoopArgs): Promise<RunState> {
           projectRoot: args.projectRoot,
           completionPollIntervalMs: args.completionPollIntervalMs,
           completionIdleThresholdMs: args.completionIdleThresholdMs,
+          completionSpawnGraceMs: args.completionSpawnGraceMs,
         },
         step as AgentStep,
       );
