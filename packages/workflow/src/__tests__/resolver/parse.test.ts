@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractCodeSections,
   isCodeFile,
+  matchClaim,
 } from "../../resolver/parse.js";
 
 describe("isCodeFile", () => {
@@ -129,5 +130,75 @@ describe("extractCodeSections", () => {
     expect(out).toHaveLength(2);
     expect(out[0].endLine).toBe(out[1].startLine);
     expect(out[1].endLine).toBe(src.split("\n").length);
+  });
+});
+
+describe("matchClaim — loose matching (Phase 3.11)", () => {
+  it("verbatim claim still matches as exact_substring", () => {
+    const section = "Orchestrates the write path: generate a random 7-char base62 code.";
+    const claim = "generate a random 7-char base62 code";
+    const m = matchClaim(claim, section);
+    expect(m.match_kind).toBe("exact_substring");
+    expect(m.confidence).toBe(1.0);
+  });
+
+  it("paraphrase passes with prefix match (generates → generate)", () => {
+    const section = "Orchestrates the write path: generate a random 7-char base62 code.";
+    const claim = "Shortener generates random 7-char base62 code";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(true);
+    expect(m.match_kind).toBe("token_overlap");
+    expect(m.confidence).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it("50%-threshold passes (3 of 5 tokens match)", () => {
+    const section = "alpha beta gamma delta epsilon";
+    const claim = "alpha beta gamma omicron upsilon";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(true);
+    expect(m.match_kind).toBe("token_overlap");
+    expect(m.confidence).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it("below-threshold fails (2 of 5 tokens match)", () => {
+    const section = "alpha beta xxxxx yyyyy zzzzz";
+    const claim = "alpha beta omicron upsilon lambda";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(false);
+    expect(m.match_kind).toBeNull();
+  });
+
+  it("prefix below 4 chars does not match (set vs setIfAbsent)", () => {
+    // "set" is length 3 → filtered by tokenize; "up" is length 2 → filtered.
+    // No tokens survive, so result is no-match.
+    const section = "we call setIfAbsent on the cache";
+    const claim = "set up";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(false);
+  });
+
+  it("prefix is bidirectional (section 'route' vs claim 'routes')", () => {
+    const section = "we route the key to the owning shard via hashring lookup";
+    const claim = "routes lookup hashring shard";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(true);
+    expect(m.match_kind).toBe("token_overlap");
+  });
+
+  it("prefix is bidirectional (section 'routes' vs claim 'route')", () => {
+    const section = "the shortener routes incoming keys through the ring lookup";
+    const claim = "route lookup shortener incoming";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(true);
+    expect(m.match_kind).toBe("token_overlap");
+  });
+
+  it("totally invented claim fails", () => {
+    const section =
+      "HashRing distributes keys across shards using consistent hashing with virtual nodes.";
+    const claim = "implements RAFT consensus protocol with paxos quorum voting";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(false);
+    expect(m.match_kind).toBeNull();
   });
 });
