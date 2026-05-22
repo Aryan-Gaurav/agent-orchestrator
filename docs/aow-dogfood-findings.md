@@ -256,3 +256,68 @@ Each failure is one tractable bugfix. None require redesign. Stopping the dogfoo
 Combined: ~1.5 engineer-days. After that, re-run dogfood and expect to surface a *different* class of bugs (probably in `hld` or `impl` stages).
 
 
+---
+
+## Run 4 — Re-dogfood post Phase 3.8 (2026-05-22)
+
+After PR #14 landed all 5 fixes, ran the URL-shortener workflow twice.
+
+### First attempt (pre-rebuild — failure mode: stale dist)
+- `aow run workflow.yaml` invoked the binary, which loaded compiled JS from `packages/workflow/dist/`. The merge had not been rebuilt.
+- Symptoms identical to Run 3: 10 lint errors, no revision loop, no lint_report in state, run failed at design attempt 1.
+- **Finding 6 (process):** `aow` has no build-freshness check. The user has to remember to `pnpm --filter @aoagents/ao-workflow build` after pulling. The Phase 3.8 PR was effectively invisible until rebuilt.
+- **Suggested fix:** either (a) `aow` boot prints a warning when `dist/` mtime < any `src/**/*.ts` mtime, or (b) the `aow` bin wrapper invokes the build step lazily, or (c) ship a published binary so users never hit this. Lowest-risk is (a).
+
+### Second attempt (post-rebuild)
+Run id: `wf-url-shortener-build-20260522T033437`. All 5 Phase 3.8 fixes activated.
+
+| Fix | Activated? | Evidence |
+|---|---|---|
+| 1 — Resolver consults `inputs:` map | ✅ | Lint errors dropped from 10 → 1 (only `out-of-scope` slug mismatched, not all paths) |
+| 2 — GitHub-style slug acceptance | ⚠️ partial | `out-of-scope` slug still failed once on attempt 1, but agent retry produced a passing version |
+| 3 — Revision loop on `citations_invalid` | ✅ | Log: `revising (attempt 1/3)` → `attempt=2` → `completed` |
+| 4 — `lint_report` persisted to state.json | ✅ | Stored on `steps.design.history[0].lint_report` (the *failed* attempt), not on `current_attempt` of the passing attempt. The status-check script was looking in the wrong field; the data is there. |
+| 5 — Run-id suffixed branch names | ✅ | Branch: `aow-url-shortener-build-design-1-wf-url-shortener-build-20260522T033437` |
+
+Design step completed in 2 attempts (~110s). Then a NEW failure appeared at hld.
+
+### Finding 7 — `hld` agent declared dead 88ms after spawn (spawn race)
+
+**Symptom**
+```
+03:36:30.565  step  [hld] spawning agent=claude-code branch=aow-url-shortener-build-hld-1-...
+03:36:30.653  error [hld] Session ust-6 reached terminal status 'spawning' (activity=exited) before producing outputs
+run: failed
+```
+The gap between `started_at` and `completed_at` in state.json is **88ms**. claude-code's tmux session takes longer than that to attach and register its first activity. The engine sees `status=spawning, activity=exited` (because no PID has reported yet) and treats that as terminal.
+
+**Smoking-gun evidence:** the abandoned ust-6 session continued running anyway and **successfully produced `hld.md` (244 lines)** after the engine had already marked the step failed. The agent was fine; the engine gave up too early.
+
+**Root cause (hypothesis)**
+The completion-detector in `packages/workflow/src/engine/...` polls AO `LifecycleManager` for session status and checks for terminal states. The check is something like "if `status` is in a terminal set (`spawning`+`exited`?) and outputs haven't been produced → fail." But `spawning` + `activity=exited` is the **normal state for the first ~100–500ms** of every claude-code spawn before the wrapper has set up its PTY and the activity log.
+
+Two sub-options:
+- 7a: `spawning` should be a **transient** state, not eligible for terminal classification regardless of activity. Only `idle/working/done` etc. count as "agent attached."
+- 7b: Apply a minimum-spawn-grace-period (say, 30s) before declaring exit on any newly-spawned session.
+
+7a is the correct fix; 7b is a band-aid. Likely both: the grace period prevents catastrophic regressions if 7a misclassifies something.
+
+**Why design didn't hit this:** likely lucky timing — design's first poll happened to land after claude-code attached, hld's didn't.
+
+### Finding 8 — Revision loop preserves prior failed branch, agents pile up
+
+Five `ust-N` sessions exist after the run: ust-3 (stale from prior run), ust-4 (design attempt 1, failed), ust-5 (design attempt 2, passed), ust-6 (hld attempt 1, abandoned), ust-orchestrator.
+
+Each revision attempt spawns a fresh session on a fresh branch (`-design-1-...`, `-design-2-...`). The prior attempt's session is never killed — it's just orphaned in tmux. After 3 revisions per step × 4 steps = potentially 12 zombie sessions per run.
+
+**Suggested fix:** when starting attempt N+1, kill the session for attempt N (its branch + worktree is preserved for forensics, but the tmux session is freed). This is a 1-line addition near the revision-loop spawn site.
+
+### Verdict for Phase 3.9
+
+Phase 3.8 worked. The engine now does revision loops, surfaces lint errors, and uses collision-free branches. The remaining blockers are different:
+
+1. **Spawn-race (Finding 7)** — blocks every multi-step workflow because step 2+ will hit it intermittently. Highest priority.
+2. **Build-freshness UX (Finding 6)** — silent failure mode for any user pulling fixes. High priority.
+3. **Zombie sessions (Finding 8)** — quality-of-life, not a blocker. Medium priority.
+
+Estimated effort: 3 + 6 + 8 = ~1 engineer-day total. Then another dogfood to confirm.
