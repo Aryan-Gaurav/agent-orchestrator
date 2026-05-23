@@ -160,21 +160,23 @@ describe("matchClaim — loose matching (Phase 3.11)", () => {
     expect(m.confidence).toBeGreaterThanOrEqual(0.5);
   });
 
-  it("below-threshold fails (2 of 5 tokens match)", () => {
-    const section = "alpha beta xxxxx yyyyy zzzzz";
-    const claim = "alpha beta omicron upsilon lambda";
+  it("below-threshold returns sentinel (1 of 5 tokens match)", () => {
+    const section = "alpha xxxxx yyyyy zzzzz wwwww";
+    const claim = "alpha omicron upsilon lambda epsilon";
     const m = matchClaim(claim, section);
     expect(m.found).toBe(false);
-    expect(m.match_kind).toBeNull();
+    expect(m.match_kind).toBe("below_threshold");
+    expect(m.confidence).toBeLessThan(0.3);
   });
 
   it("prefix below 4 chars does not match (set vs setIfAbsent)", () => {
     // "set" is length 3 → filtered by tokenize; "up" is length 2 → filtered.
-    // No tokens survive, so result is no-match.
+    // No tokens survive, so result is no-match with null match_kind.
     const section = "we call setIfAbsent on the cache";
     const claim = "set up";
     const m = matchClaim(claim, section);
     expect(m.found).toBe(false);
+    expect(m.match_kind).toBeNull();
   });
 
   it("prefix is bidirectional (section 'route' vs claim 'routes')", () => {
@@ -193,10 +195,18 @@ describe("matchClaim — loose matching (Phase 3.11)", () => {
     expect(m.match_kind).toBe("token_overlap");
   });
 
-  it("totally invented claim fails", () => {
+  it("totally invented claim returns below_threshold sentinel (tokens exist, 0 overlap)", () => {
     const section =
       "HashRing distributes keys across shards using consistent hashing with virtual nodes.";
     const claim = "implements RAFT consensus protocol with paxos quorum voting";
+    const m = matchClaim(claim, section);
+    expect(m.found).toBe(false);
+    expect(m.match_kind).toBe("below_threshold");
+  });
+
+  it("empty token list (all stopwords/short) returns null match_kind", () => {
+    const section = "the cat sat on the mat";
+    const claim = "the and for";
     const m = matchClaim(claim, section);
     expect(m.found).toBe(false);
     expect(m.match_kind).toBeNull();

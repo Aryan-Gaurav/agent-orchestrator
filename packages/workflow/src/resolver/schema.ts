@@ -7,6 +7,7 @@ const resolverErrorKindSchema = z.enum([
   "file_not_found",
   "section_not_found",
   "claim_mismatch",
+  "claim_unfaithful",
   "malformed_ref",
   "outside_artifacts_dir",
 ]);
@@ -15,12 +16,16 @@ const resolverMatchKindSchema = z.enum([
   "exact_substring",
   "normalized_substring",
   "token_overlap",
+  "below_threshold",
+  "llm_verified",
+  "llm_unavailable",
 ]);
 
 const claimMatchSchema = z.object({
   found: z.boolean(),
   match_kind: resolverMatchKindSchema.nullable(),
   confidence: z.number().min(0).max(1),
+  reason: z.string().optional(),
 });
 
 const citationSchema = z.object({

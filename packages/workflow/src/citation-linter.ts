@@ -34,6 +34,7 @@ export type CitationFindingCode =
   | "section_not_found"
   | "outside_artifacts_dir"
   | "claim_mismatch"
+  | "claim_unfaithful"
   | "claim_low_confidence"
   | "missing_claim"
   | "no_citations_but_inputs"
@@ -223,6 +224,15 @@ async function lintCitation(
         claim: cite.claim,
         message: claimResp.message,
       });
+    } else if (claimResp.error === "claim_unfaithful") {
+      findings.push({
+        kind: "error",
+        code: "claim_unfaithful",
+        outputFile: relOutput,
+        ref: cite.refString,
+        claim: cite.claim,
+        message: claimResp.message,
+      });
     }
     return findings;
   }
@@ -240,7 +250,18 @@ async function lintCitation(
           ? `confidence < ${CLAIM_LOW_CONFIDENCE_THRESHOLD} (review recommended)`
           : `confidence >= ${CLAIM_LOW_CONFIDENCE_THRESHOLD}`,
     });
+  } else if (match && match.found && match.match_kind === "llm_unavailable") {
+    findings.push({
+      kind: "warning",
+      code: "claim_low_confidence",
+      outputFile: relOutput,
+      ref: cite.refString,
+      claim: cite.claim,
+      message: `Claim has very low token overlap (${match.confidence.toFixed(2)}) and the LLM checker was unavailable — passed under low confidence`,
+      detail: "claude CLI unreachable; review recommended",
+    });
   }
+  // match_kind === "llm_verified" → clean pass, no finding.
   return findings;
 }
 

@@ -303,10 +303,12 @@ export function matchClaim(claim: string, sectionContent: string): ClaimMatch {
     }
   }
   const confidence = matched / tokens.length;
-  if (confidence >= 0.5) {
+  if (confidence >= 0.3) {
     return { found: true, match_kind: "token_overlap", confidence };
   }
-  return { found: false, match_kind: null, confidence: 0.0 };
+  // Suspicion zone: tokens exist but overlap is very low. Defer to the LLM
+  // check in resolveCitation (script.ts). matchClaim itself stays sync/pure.
+  return { found: false, match_kind: "below_threshold", confidence };
 }
 
 export function sectionBody(content: string, sec: Section): string {

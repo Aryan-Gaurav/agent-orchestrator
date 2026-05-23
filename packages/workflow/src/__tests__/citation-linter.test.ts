@@ -133,15 +133,23 @@ describe("lintStepCitations — claim handling", () => {
     expect(lowConf?.kind).toBe("warning");
   });
 
-  it("claim that does not match → claim_mismatch error", async () => {
-    const s = newScratch();
-    const out = writeOutput(
-      s.artifactsDir,
-      "plan.md",
-      `# Plan\n<!-- ref: design.md#auth-flow claim="quantum entanglement" -->\n`,
-    );
-    const report = await lintStepCitations(baseInputs(s, [out]));
-    expect(report.errors.some((e) => e.code === "claim_mismatch")).toBe(true);
+  it("claim that does not match → claim_unfaithful error (LLM tier, stubbed)", async () => {
+    // After Phase 3.12, a low-overlap claim is routed to the LLM tier instead
+    // of failing as claim_mismatch directly. We stub the LLM verdict so the
+    // test does not depend on the local `claude` CLI being installed.
+    process.env.AOW_LLM_CHECK_STUB = "unfaithful";
+    try {
+      const s = newScratch();
+      const out = writeOutput(
+        s.artifactsDir,
+        "plan.md",
+        `# Plan\n<!-- ref: design.md#auth-flow claim="quantum entanglement" -->\n`,
+      );
+      const report = await lintStepCitations(baseInputs(s, [out]));
+      expect(report.errors.some((e) => e.code === "claim_unfaithful")).toBe(true);
+    } finally {
+      delete process.env.AOW_LLM_CHECK_STUB;
+    }
   });
 });
 

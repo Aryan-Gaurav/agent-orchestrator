@@ -74,18 +74,23 @@ export type ResolverErrorKind =
   | "file_not_found"
   | "section_not_found"
   | "claim_mismatch"
+  | "claim_unfaithful"
   | "malformed_ref"
   | "outside_artifacts_dir";
 
 export type ResolverMatchKind =
   | "exact_substring"
   | "normalized_substring"
-  | "token_overlap";
+  | "token_overlap"
+  | "below_threshold"
+  | "llm_verified"
+  | "llm_unavailable";
 
 export interface ClaimMatch {
   found: boolean;
   match_kind: ResolverMatchKind | null;
   confidence: number;
+  reason?: string;
 }
 
 export interface Citation {

@@ -1307,9 +1307,9 @@ tiers (first hit wins, short-circuit):
    lowercased and whitespace-collapsed, and the normalized claim is a
    substring of the normalized section.
 3. **`token_overlap`** (confidence `matched / total`, accepted at
-   `≥ 0.5`) — the claim is tokenized into load-bearing words (length
-   ≥ 4, non-stopword, lowercase, split on non-alphanumerics). A claim
-   token counts as matched when it appears as a substring in the
+   `≥ 0.3` as of Phase 3.12) — the claim is tokenized into load-bearing
+   words (length ≥ 4, non-stopword, lowercase, split on non-alphanumerics).
+   A claim token counts as matched when it appears as a substring in the
    lowercased section content, OR when some section token (extracted
    with the same rule) shares a **4-character minimum prefix** with
    the claim token in either direction (`section.startsWith(claim)`
@@ -1320,12 +1320,53 @@ tiers (first hit wins, short-circuit):
 The bidirectional prefix tolerance is what lets `generates` match
 `generate`, `routes` match `route` / `routing`, and `lookup` match
 `look` / `looking` — common surface-form differences when an agent
-paraphrases a section it just read. The 50% threshold means at least
-half of the claim's load-bearing tokens must appear in the section
-(literally or via prefix) for the citation to validate; anything below
-returns `found: false`. Tier 3 hits with confidence `< 0.7` still
-surface as a `claim_low_confidence` warning at the engine layer (see
-`engine/citation-step.ts`) so reviewers can spot weak paraphrases.
+paraphrases a section it just read. Tier 3 hits with confidence `< 0.7`
+still surface as a `claim_low_confidence` warning at the engine layer
+(see `engine/citation-step.ts`) so reviewers can spot weak paraphrases.
+
+### 17.0.2 LLM fallback for very-low-overlap claims (Phase 3.12)
+
+When `token_overlap` lands **below 0.3** with non-empty tokens,
+`matchClaim` returns a new `match_kind: "below_threshold"` sentinel
+instead of a hard fail. The resolver subprocess then shells out to the
+local `claude` CLI for a faithfulness verdict:
+
+```
+exact_substring        confidence 1.0       → pass
+normalized_substring   confidence 0.85      → pass
+token_overlap ≥ 0.3    confidence varies    → pass (warning if < 0.7)
+token_overlap < 0.3    →  LLM CHECK
+                          ├── faithful=true  → pass (match_kind: "llm_verified")
+                          ├── faithful=false → fail (error: claim_unfaithful)
+                          └── unavailable    → permissive pass + warning
+zero tokens / no match → fail (claim_mismatch — existing)
+```
+
+The check is implemented in `packages/workflow/src/resolver/llm-check.ts`
+and is invoked exclusively from `resolveCitation` in `script.ts`. It
+calls `execFile("claude", ["-p", "--output-format", "json", prompt])`
+with a 30s timeout and parses the inner `.result` JSON for
+`{faithful: boolean, reason: string}`. Hard rules:
+
+- **No new runtime dependencies.** Uses `node:child_process.execFile`
+  only — no `@anthropic-ai/sdk`.
+- **No API key handling.** The resolver relies on the `claude` CLI's
+  own auth (the workflow agent already runs as claude-code).
+- **No caching.** Each call shells fresh; verdicts are not memoized.
+- **Fail-permissive on tooling errors.** Spawn-not-found, timeout,
+  non-zero exit, or unparseable output all return `null` from
+  `checkClaimWithClaude`, which the caller maps to
+  `match_kind: "llm_unavailable"` (pass + warning). Workflows do not
+  get blocked by a flaky `claude` binary.
+- **`matchClaim` stays pure and synchronous.** The async LLM call is
+  confined to the one call site in `script.ts`.
+
+The linter (§17.2) treats `claim_unfaithful` as a hard error (kind:
+`"error"`, code: `"claim_unfaithful"`), `llm_verified` as a clean
+pass, and `llm_unavailable` as a `claim_low_confidence` warning. A
+test seam (`AOW_LLM_CHECK_STUB` env var, values `faithful` /
+`unfaithful` / `null`) bypasses the shell-out for tests that cannot
+mock across the subprocess boundary.
 
 ### 17.1 Resolver Script — `.ao/aow-ref`
 
