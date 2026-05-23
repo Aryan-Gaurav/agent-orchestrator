@@ -19,6 +19,7 @@ import {
   extractCodeSections,
   extractOutgoingRefs,
   extractSections,
+  findSectionFuzzy,
   isCodeFile,
   matchClaim,
   parseRef,
@@ -111,7 +112,7 @@ export async function resolveCitation(
   args: ResolveArgs,
 ): Promise<ResolverResponse> {
   const { ref, artifactsDir, workspacePath, stepId, claim, inputs } = args;
-  let response: ResolverResponse;
+  let response!: ResolverResponse;
   let matchKind: ResolverMatchKind | null = null;
 
   const parsed = parseRef(ref);
@@ -210,14 +211,29 @@ export async function resolveCitation(
           ? extractCodeSections(content)
           : extractSections(content);
         const targetSlug = slugify(parsed.section.replace(/_/g, " "));
-        const section = sections.find((s) => s.slug === targetSlug);
+        let section = sections.find((s) => s.slug === targetSlug);
         if (!section) {
-          response = makeError(
-            ref,
-            "section_not_found",
-            `Section "${parsed.section}" not found in ${parsed.file}`,
-            sections.map((s) => s.slug),
-          );
+          const fuzzy = findSectionFuzzy(sections, targetSlug);
+          if (fuzzy.length === 1) {
+            section = fuzzy[0];
+          } else if (fuzzy.length > 1) {
+            response = makeError(
+              ref,
+              "ambiguous_section",
+              `Reference "#${parsed.section}" matches multiple headings in ${parsed.file}: ${fuzzy.map((s) => `"${s.heading}"`).join(", ")}. Use a more specific slug.`,
+              fuzzy.map((s) => s.slug),
+            );
+          } else {
+            response = makeError(
+              ref,
+              "section_not_found",
+              `Section "${parsed.section}" not found in ${parsed.file}`,
+              sections.map((s) => s.slug),
+            );
+          }
+        }
+        if (!section) {
+          // response already set above (ambiguous_section or section_not_found)
         } else {
           const body = sectionBody(content, section);
           let claimMatch = claim ? matchClaim(claim, body) : null;

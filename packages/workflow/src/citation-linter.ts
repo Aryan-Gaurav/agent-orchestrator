@@ -32,6 +32,7 @@ export type CitationFindingCode =
   | "malformed_ref"
   | "file_not_found"
   | "section_not_found"
+  | "ambiguous_section"
   | "outside_artifacts_dir"
   | "claim_mismatch"
   | "claim_unfaithful"
@@ -171,6 +172,7 @@ async function lintCitation(
     if (
       code === "file_not_found" ||
       code === "section_not_found" ||
+      code === "ambiguous_section" ||
       code === "malformed_ref" ||
       code === "outside_artifacts_dir"
     ) {
@@ -182,7 +184,8 @@ async function lintCitation(
         claim: cite.claim ?? undefined,
         message: existResp.message,
         detail:
-          code === "section_not_found" && existResp.available_sections
+          (code === "section_not_found" || code === "ambiguous_section") &&
+          existResp.available_sections
             ? `available: ${existResp.available_sections.join(", ")}`
             : undefined,
       });

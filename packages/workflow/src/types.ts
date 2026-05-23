@@ -73,6 +73,7 @@ export interface ArtifactRef {
 export type ResolverErrorKind =
   | "file_not_found"
   | "section_not_found"
+  | "ambiguous_section"
   | "claim_mismatch"
   | "claim_unfaithful"
   | "malformed_ref"

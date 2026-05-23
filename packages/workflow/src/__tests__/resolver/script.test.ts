@@ -203,6 +203,75 @@ describe("resolveCitation — error kinds", () => {
     }
   });
 
+  it("fuzzy section match: tokens-on-heading resolves a paraphrased slug", async () => {
+    // Fixture has "## Auth Flow" (slug: auth-flow). Cited slug "flow" with a
+    // single token that appears in only one heading should resolve to it.
+    const r = await resolveCitation({
+      ref: "design.md#auth",
+      artifactsDir: FIXTURES,
+      workspacePath: ws(),
+      stepId: "s",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.section_heading).toContain("Auth Flow");
+    }
+  });
+
+  it("ambiguous_section when cited slug matches multiple headings", async () => {
+    // Both "## Overview Notes" and (implicitly via single-token "data" not
+    // matching) — use a clearer case: token "notes" in only "Overview Notes",
+    // but token "data" appears in both "Data Retention" AND would not in
+    // others. To create true ambiguity, cite "section" which won't match
+    // anything; better to cite a single-word token that hits 2+ headings.
+    // Build a tiny fixture inline: use a temp file.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "aow-fuzzy-ambig-"));
+    writeFileSync(
+      join(dir, "doc.md"),
+      "# Doc\n\n## Acceptance\nbody1\n\n## Acceptance Tests\nbody2\n",
+      "utf8",
+    );
+    const r = await resolveCitation({
+      ref: "doc.md#acceptance",
+      artifactsDir: dir,
+      workspacePath: ws(),
+      stepId: "s",
+    });
+    // Strict pass finds exact "acceptance" → success. To force ambiguity,
+    // cite a slug that doesn't match strictly but tokenizes into a word
+    // present in both headings.
+    expect(r.ok).toBe(true);
+    const r2 = await resolveCitation({
+      ref: "doc.md#tests-acceptance", // tokens: [tests, acceptance]; matches only "Acceptance Tests"
+      artifactsDir: dir,
+      workspacePath: ws(),
+      stepId: "s",
+    });
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.section_heading).toContain("Acceptance Tests");
+
+    writeFileSync(
+      join(dir, "two.md"),
+      "# T\n\n## Plan A details\nx\n\n## Plan A summary\ny\n",
+      "utf8",
+    );
+    const r3 = await resolveCitation({
+      ref: "two.md#plan-a", // tokens: [plan, a]; appears in both headings
+      artifactsDir: dir,
+      workspacePath: ws(),
+      stepId: "s",
+    });
+    expect(r3.ok).toBe(false);
+    if (!r3.ok) {
+      expect(r3.error).toBe("ambiguous_section");
+      expect(r3.message).toMatch(/Plan A details/);
+      expect(r3.message).toMatch(/Plan A summary/);
+    }
+  });
+
   it("claim_unfaithful when low-overlap claim is rejected by LLM (stubbed)", async () => {
     process.env.AOW_LLM_CHECK_STUB = "unfaithful";
     try {

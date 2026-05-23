@@ -78,6 +78,27 @@ export function extractSections(content: string): Section[] {
   return sections;
 }
 
+/**
+ * Find a section by token-on-heading match. Tokenizes the cited slug by `-`
+ * and returns every section whose heading text contains ALL tokens
+ * (case-insensitive substring). Caller decides: 0 = section_not_found,
+ * 1 = use it, 2+ = ambiguous_section.
+ */
+export function findSectionFuzzy(
+  sections: Section[],
+  citedSlug: string,
+): Section[] {
+  const tokens = citedSlug
+    .toLowerCase()
+    .split("-")
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) return [];
+  return sections.filter((s) => {
+    const hay = s.heading.toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  });
+}
+
 const CODE_FILE_EXTENSIONS = [
   ".ts",
   ".tsx",

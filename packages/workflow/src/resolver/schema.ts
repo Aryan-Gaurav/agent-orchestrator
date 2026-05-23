@@ -6,6 +6,7 @@ import type { ResolverResponse } from "../types.js";
 const resolverErrorKindSchema = z.enum([
   "file_not_found",
   "section_not_found",
+  "ambiguous_section",
   "claim_mismatch",
   "claim_unfaithful",
   "malformed_ref",
