@@ -1023,6 +1023,16 @@ appear as a Kanban-style row across the dashboard.
   `/runs/[id]/`
 - React components for the workflow grid view
 - SSE channel for state.json updates
+- **"Group by workflow" toggle on the sidebar / Kanban.** Today the
+  dashboard groups sessions by project. When two `aow` workflows run
+  concurrently in the same project (the §15.8 case), the dashboard
+  shows 8–12 `ust-N` sessions intermixed. Branch-name prefixes
+  (`aow-url-shortener-build-*` vs `aow-auth-system-*`) make it
+  greppable but not visually obvious. The toggle reads `workflowId`
+  + `runId` (carried on the AO session schema as optional fields, set
+  by the `aow` engine when it spawns) and renders sessions grouped
+  under their workflow header. Falls back to project-grouping for
+  non-workflow sessions.
 
 **Why deferred:** v1 is CLI-only by design (§2). The dashboard is
 worthwhile but separable; ship the engine first.
