@@ -639,3 +639,71 @@ When two `aow run` invocations briefly both pointed at the same run dir (during 
 - Or contention was so brief no race window was hit.
 
 Either way, Phase 3.13 should add a **PID-aware lock file** in the run dir (`.workflow-state/runs/<id>/lock`) that prevents a second `aow` process from operating on a run dir owned by another live PID. If the lock holder's PID is dead (crash recovery), allow takeover with a warning. §15.6 of the design doc already flags this; the multi-workflow test just confirmed it's not theoretical.
+
+---
+
+## Multi-Workflow Test 2 — Different Repos, Different Workflows (2026-05-23)
+
+Fixtures: `~/aow-test-url-shortener/` (4-step URL shortener) + `~/aow-test-feature-b/` (2-step JSON-diff library). Each has its own `agent-orchestrator.yaml` with distinct `projectId` and `sessionPrefix`.
+
+### Outcome
+
+| Workflow | Run ID | Steps | Outcome |
+|---|---|---|---|
+| URL shortener (A) | `wf-url-shortener-build-20260523T015545` | 4 | ✅ completed (tests retry 3/3 — 2× `claim_unfaithful` LLM-tier rejections caught a "150 vnodes" hallucination) |
+| JSON diff (B) | `wf-json-diff-build-20260523T015545` | 2 | ✅ completed (but blocked ~10 min on trust prompt — see Finding 16) |
+
+Both runs supervised by the single AO daemon. No cross-project collisions in branches, run-dirs, or artifacts. Confirms `aow` works across separate repos with separate AO project identities.
+
+### Finding 16 — First-time "trust this folder" prompt blocks workflows on fresh repos
+
+When `aow run` spawns Claude Code into a worktree of a repo Claude has never seen, Claude shows its own "Do you trust this folder?" interactive prompt and **blocks indefinitely**. The workflow worker has no way to answer it, the step stays `running` forever, no timeout fires. B sat stuck for 10 min in Test 2 until I manually sent `1<Enter>` to the tmux pane.
+
+**Root cause:** the test repos' `agent-orchestrator.yaml` files had no `agentConfig.permissions` set, so they defaulted to `"default"` mode. AO's claude-code plugin already passes `--dangerously-skip-permissions` when permissions is `"permissionless"` or `"auto-edit"` (`packages/plugins/agent-claude-code/src/index.ts:685–689`), but `aow` users didn't know this was required for unattended runs.
+
+**Fix:** add `agentConfig.permissions: permissionless` to `agent-orchestrator.yaml`. No code change needed — the plumbing already exists end-to-end (`session-manager.ts:1387` threads `permissions` from `resolveAgentSelection` into the agent launch config). Docs updated: `aow-guide.md` §2.1 and `aow-hello-world.md` heads-up call-out.
+
+Verified post-fix in **Test 2b** (same fixtures, both repos with `permissions: permissionless`): both runs (A 4-step, B 2-step) completed with no trust prompts. Tmux capture during run showed `bypass permissions on` from the first spawn.
+
+---
+
+## Multi-Workflow Test 3 — Different Repos, Same Filename (2026-05-23)
+
+Fixtures: `~/aow-test-feature-b/workflow.yaml` (JSON diff, re-run) + `~/aow-test-feature-c/workflow.yaml` (CSV→JSON CLI). Both files named identically; different `id:`, `project_id:`, and contents.
+
+### Outcome
+
+| Workflow | Run ID | Steps | Outcome |
+|---|---|---|---|
+| JSON diff (B, re-run) | `wf-json-diff-build-20260523T024549` | 2 | ✅ completed |
+| CSV→JSON (C) | `wf-csv-to-json-build-20260523T024743` | 2 | ✅ completed |
+
+**Key result: filename collision is a non-issue.** Run isolation hinges on `workflow.id` + `project_id` + per-repo `.workflow-state/`. Two repos with identical `workflow.yaml` filenames coexist without any state cross-contamination. The "file clash" concern from earlier was a misunderstanding of how isolation is keyed.
+
+### Finding 17 — Workflow schema is undiscoverable
+
+Setting up C's `workflow.yaml` hit two `WF_VALIDATION` errors back-to-back:
+
+1. `steps.0.type: Invalid discriminator value. Expected 'agent' | 'human_approval'` — needed `type: agent` per step.
+2. `steps.0.inputs: Expected object, received array` — needed map shape (`inputs: { name: path }`) not list shape (`inputs: [name, …]`).
+
+Neither requirement is documented in a place a first-time user would look. `aow --help` shows no schema reference. `docs/aow-guide.md` §3 gives one example but doesn't enumerate field shapes. The only way I unblocked C was by reading B's working `workflow.yaml`.
+
+**Phase 4 candidates:**
+- `aow init <name>` — scaffold a minimal valid `workflow.yaml` (one agent step + comments).
+- Export JSON schema for editor autocomplete (Zod → JSON Schema is one-liner). Reference it via `$schema` in the YAML.
+- Expand `docs/aow-guide.md` §3 with a "Required vs optional fields" table.
+
+---
+
+## Test 2b Confirmation — Trust-Prompt Fix Verified (2026-05-23)
+
+Re-ran Test 2 with both `agent-orchestrator.yaml` files set to `agentConfig.permissions: permissionless`. State wiped, zombies killed before launch.
+
+| Workflow | Run ID | Steps | Outcome |
+|---|---|---|---|
+| URL shortener (A) | `wf-url-shortener-build-20260523T035245` | 4 | ✅ completed (tests retry 2/3 — LLM tier caught one more hallucination) |
+| JSON diff (B) | `wf-json-diff-build-20260523T035245` | 2 | ✅ completed |
+
+Tmux capture immediately after spawn confirmed `⏵⏵ bypass permissions on` on both panes — no trust prompt fired on either repo. Finding 16 closed.
+

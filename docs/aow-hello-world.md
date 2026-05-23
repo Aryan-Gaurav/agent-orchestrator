@@ -184,6 +184,15 @@ cd ~/aow-test-url-shortener
 node /path/to/agent-orchestrator/packages/aow/bin/aow.js run workflow.yaml
 ```
 
+> **Heads-up: skip the trust prompt.** Claude Code shows a "Do you trust this folder?" prompt the first time it spawns into a worktree of a fresh repo, and `aow` has no way to answer it. Add this to your `agent-orchestrator.yaml` before the first run:
+>
+> ```yaml
+> agentConfig:
+>   permissions: permissionless
+> ```
+>
+> This makes `aow` pass `--dangerously-skip-permissions` on every spawn — the trust prompt (and per-tool prompts) are bypassed. See `docs/aow-guide.md` §2.1.
+
 On first run you'll see:
 
 ```

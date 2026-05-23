@@ -42,6 +42,22 @@ When `@aoagents/aow` is published the same commands work as:
 aow <command> [args]
 ```
 
+### 2.1 Agent permissions (skip the first-time-trust prompt)
+
+When Claude Code spawns into a worktree of a repo it has never seen, it shows a "Do you trust this folder?" prompt and **blocks until you answer**. For autonomous workflow runs that prompt sits forever and the step never makes progress.
+
+Fix once per repo: add `agentConfig.permissions: permissionless` to your `agent-orchestrator.yaml`. This makes `aow` pass `--dangerously-skip-permissions` to every Claude Code session it spawns, so trust prompts (and per-tool permission prompts) are bypassed.
+
+```yaml
+projectId: my-project
+defaultBranch: main
+
+agentConfig:
+  permissions: permissionless    # required for unattended aow runs on fresh repos
+```
+
+Other valid values: `default` (prompt on every tool use — interactive only), `auto-edit` (also passes `--dangerously-skip-permissions`), `suggest`, `skip`. For unattended `aow` runs, `permissionless` is the right choice. If you're attached to the tmux session and want to gate every action, `default`.
+
 ---
 
 ## 3. Writing a workflow
