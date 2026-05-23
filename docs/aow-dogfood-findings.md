@@ -445,3 +445,140 @@ Phase 3.10 must be re-verified in a future run, after the `claim_mismatch` block
 - **Phase 3.11b (broader):** stemming + partial-match + a `--claim-strict` flag for workflows that want today's behavior. ~3 hours.
 
 Recommendation: ship 3.11a now, surface 3.11b only if 3.11a still produces too many false-passes on real workflows. Brief target: `.workflow-bootstrap/phase-3.11-prompt.md`.
+---
+
+## Run 7 — Post Phase 3.11 (2026-05-22, evening)
+
+Run id: `wf-url-shortener-build-20260522T231949`. Phase 3.11 (loose claim matching: 50% threshold + 4-char prefix tolerance) merged and rebuilt.
+
+### Outcome
+
+| Step | Status | Attempts | Notes |
+|---|---|---|---|
+| design | ✅ completed | 2 | one revision on a new error code |
+| hld | ✅ completed | 1 | first try |
+| impl | ✅ completed | 1 | **first try** — Phase 3.11 unblocked this |
+| tests | ❌ failed | 3 | exhausted on `claim_low_confidence` errors |
+
+### What worked
+
+- Phase 3.10 (code-symbol anchors) **verified at last** — citations like `src/HashRing.ts#addShard` resolved cleanly.
+- Phase 3.11 (loose matching) hit its target — impl passed first try, vs 3 attempts → fail in Run 6.
+
+### Finding 12 — Phase 3.11 regression: `claim_low_confidence` is a HARD ERROR
+
+`citation-linter.ts:231` emitted `kind: "error"` for any match with confidence < 0.7. Pre-3.11, the resolver only ever returned token_overlap matches at confidence 1.0 (since 100% coverage was required), so the linter's "error if <0.7" branch was effectively dead code.
+
+Phase 3.11 lowered the resolver pass threshold to 0.5 — opening the [0.5, 0.7) range. Every match in that range surfaced as an *error* despite the resolver having said `found: true`.
+
+Reproduction: 6 lint errors in Run 7 with codes like `[claim_low_confidence]` at confidence 0.56–0.67. None of these are wrong claims — they're valid paraphrases that the resolver explicitly accepted.
+
+**Fix (landed direct on feature branch, commit `7d63ffcf`):** `claim_low_confidence` is unconditionally `kind: "warning"`. The match itself is valid by definition (resolver returned `found: true`); low confidence is informational, surfaced via the `detail` field. The error path for `claim_low_confidence` was wrong from the start; Phase 3.11 just made it visible. Test added: `__tests__/citation-linter.test.ts` "token_overlap with confidence in [0.5, 0.7) emits warning, NOT error".
+
+### Findings status
+
+- Spawn race (Finding 7): ✅
+- Revision loop (Phase 3.8 Fix 3): ✅
+- Lint visibility (Phase 3.8 Fix 4): ✅
+- Run-id branch suffixes (Phase 3.8 Fix 5): ✅
+- Code-symbol anchors (Phase 3.10): ✅ **verified**
+- Loose claim matching (Phase 3.11): ⚠️ unmasked Finding 12 — patched
+- Zombie sessions (Finding 10): ❌ still 4 active ust sessions at run end
+
+---
+
+## Run 8 — Post Phase 3.11 patch (2026-05-22, late evening)
+
+Run id: `wf-url-shortener-build-20260522T233637`. `claim_low_confidence`-is-warning patch in.
+
+### Outcome
+
+| Step | Status | Attempts | Notes |
+|---|---|---|---|
+| design | ✅ completed | 1 | first try |
+| hld | ✅ completed | 1 | first try |
+| impl | ✅ completed | 1 | first try |
+| tests | ❌ failed | 3 | exhausted on `claim_mismatch` (genuine low overlap, not low_confidence) |
+
+### What worked
+
+- design + hld + impl all **first try** for the first time ever. The earlier blockers (slug rules, code-symbol anchors, loose matching, low-confidence warning) compound to make 3 of 4 steps essentially friction-free.
+
+### Finding 13 — Genuine paraphrase below threshold
+
+The 1 final-failed claim: agent cited `src/HashRing.ts#addShard` with `claim="addShard for an already-present shard id throws; silent overwrite would corrupt the ring."` — the *justification* sitting in a `// ref:` comment on the impl side. The function body throws but doesn't say "silent overwrite would corrupt the ring."
+
+Token overlap ~0.30. Three failure modes the linter can't distinguish at this overlap:
+1. Agent paraphrases faithfully → real match, low literal overlap.
+2. Agent invents text untethered from the section → hallucination.
+3. Agent quotes a *related* comment from the impl, not the body → drift.
+
+`matchClaim` can't tell #1 from #2-3. Raising the bar excludes paraphrase; lowering admits hallucination.
+
+**Fix path (Phase 3.12):** when overlap < 0.3, shell out to local `claude -p` for a strict faithful/unfaithful verdict. No SDK, no API key, no cache. Brief: `.workflow-bootstrap/phase-3.12-prompt.md`.
+
+---
+
+## Run 9 — Post Phase 3.12 (2026-05-23) 🎯 FIRST GREEN RUN
+
+Run id: `wf-url-shortener-build-20260523T002751`. Phase 3.12 LLM fallback merged.
+
+### Outcome
+
+| Step | Status | Attempts | Notes |
+|---|---|---|---|
+| design | ✅ completed | 1 | first try |
+| hld | ✅ completed | 1 | first try |
+| impl | ✅ completed | 2 | one revision on a real `section_not_found` (agent cited a heading that didn't exist) |
+| tests | ✅ completed | 2 | one revision after LLM caught a real hallucination |
+
+**Run status: `completed`. Failed steps: `[]`. End-to-end green for the first time.**
+
+### LLM tier verification
+
+Phase 3.12 fired twice on the tests step (attempt 1) with specific, actionable feedback:
+
+```
+[claim_unfaithful] __tests__/HashRing.test.ts:src/HashRing.ts#addShard —
+  section does not show the default vnode count (150) nor mention
+  distribution properties
+
+[claim_unfaithful] __tests__/HashRing.test.ts:src/HashRing.ts#addShard —
+  section only shows insertion of vnodes and sorting; it does not
+  demonstrate or describe the key-movement/consistent-hashing property
+```
+
+This is exactly the case the contract is designed for. The agent was claiming `addShard` exhibits consistent-hashing properties; the LLM correctly identified that those properties are emergent across the ring as a whole, not visible in `addShard`'s body alone. The agent revised on attempt 2 and tests passed.
+
+### Manual verification of produced artifact
+
+```bash
+cd ~/aow-test-url-shortener/artifacts
+pnpm test     # 10/10 vitest tests pass (HashRing, Shortener, e2e)
+pnpm build    # strict TS compiles clean
+pnpm start    # server live on :8080
+curl -X POST http://localhost:8080/shorten -H 'content-type: application/json' \
+  -d '{"url":"https://example.com"}'
+# → 200 { "code":"OeeRUC6", "short_url":"http://localhost:8080/OeeRUC6" }
+curl -i http://localhost:8080/OeeRUC6
+# → HTTP/1.1 302 Found; Location: https://example.com
+```
+
+Working URL shortener from `requirements.md`. No human intervention between `aow run` and shippable artifact.
+
+### Findings status
+
+- Phase 3.8 fixes (5): ✅
+- Phase 3.9 fixes (3): ✅
+- Phase 3.10 code-symbol anchors: ✅ verified across impl + tests
+- Phase 3.11 loose matching + patch: ✅
+- Phase 3.12 LLM fallback: ✅ fired correctly, caught real hallucination
+- Finding 10 (zombie sessions): ❌ **STILL OPEN** — Run 9 ended with 4 active ust sessions
+
+### Verdict
+
+The workflow engine is **v1-shippable**. From a 25-line `requirements.md` to a tested, running TypeScript URL shortener in one `aow run` command. The LLM safety net (Phase 3.12) is the cherry — precise without being brittle.
+
+**Remaining open issue:** Finding 10 (zombie sessions). Cosmetic, not blocking, candidate for Phase 3.13. End-of-run cleanup pass: kill all sessions registered to the completed run id.
+
+**Phase 4 unblocked:** Examples + docs polish. The hello-world doc (`docs/aow-hello-world.md`) is already written. Phase 4 packages this dogfood into the canonical first-contact UX (move fixture into `packages/workflow/examples/url-shortener/`, README top-level, `aow --help` polish).
