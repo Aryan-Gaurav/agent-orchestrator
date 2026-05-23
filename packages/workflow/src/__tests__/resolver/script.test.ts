@@ -77,10 +77,10 @@ describe("matchClaim tiers", () => {
     expect(m.confidence).toBeGreaterThanOrEqual(0.5);
   });
 
-  it("no match", () => {
+  it("no match (below_threshold sentinel — tokens exist, 0 overlap)", () => {
     const m = matchClaim("kubernetes orchestration helmcharts", body);
     expect(m.found).toBe(false);
-    expect(m.match_kind).toBeNull();
+    expect(m.match_kind).toBe("below_threshold");
   });
 });
 
@@ -203,16 +203,21 @@ describe("resolveCitation — error kinds", () => {
     }
   });
 
-  it("claim_mismatch when claim does not match", async () => {
-    const r = await resolveCitation({
-      ref: "design.md#auth-flow",
-      artifactsDir: FIXTURES,
-      workspacePath: ws(),
-      stepId: "cm",
-      claim: "kubernetes helmcharts orchestration deployment",
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toBe("claim_mismatch");
+  it("claim_unfaithful when low-overlap claim is rejected by LLM (stubbed)", async () => {
+    process.env.AOW_LLM_CHECK_STUB = "unfaithful";
+    try {
+      const r = await resolveCitation({
+        ref: "design.md#auth-flow",
+        artifactsDir: FIXTURES,
+        workspacePath: ws(),
+        stepId: "cm",
+        claim: "kubernetes helmcharts orchestration deployment",
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toBe("claim_unfaithful");
+    } finally {
+      delete process.env.AOW_LLM_CHECK_STUB;
+    }
   });
 
   it("outside_artifacts_dir rejects ../escape", async () => {

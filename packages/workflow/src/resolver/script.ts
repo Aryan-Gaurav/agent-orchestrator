@@ -25,6 +25,7 @@ import {
   sectionBody,
   slugify,
 } from "./parse.js";
+import { resolveLowConfidence } from "./llm-check.js";
 import { parseResolverResponse } from "./schema.js";
 
 // Re-export for callers that imported them from script.ts.
@@ -43,11 +44,7 @@ export interface ResolveArgs {
   workspacePath: string;
   stepId: string;
   claim?: string;
-  /**
-   * Optional step/workflow inputs. When set, citations whose file matches an
-   * input by name or basename resolve to that input's absolute path, bypassing
-   * the artifacts-dir lookup. See docs/workflow-engine.md §17.
-   */
+  /** Step/workflow inputs that resolve by name or basename — see §17. */
   inputs?: ResolverInput[];
 }
 
@@ -174,8 +171,23 @@ export async function resolveCitation(
       }
 
       if (parsed.section === null) {
-        const claimMatch = claim ? matchClaim(claim, content) : null;
-        if (claim && claimMatch && !claimMatch.found) {
+        let claimMatch = claim ? matchClaim(claim, content) : null;
+        let unfaithful: { reason: string } | null = null;
+        if (claim && claimMatch?.match_kind === "below_threshold") {
+          const r = await resolveLowConfidence(claimMatch, content, claim);
+          if (r.unfaithful) {
+            unfaithful = r.unfaithful;
+          } else if (r.replacement) {
+            claimMatch = r.replacement;
+          }
+        }
+        if (unfaithful) {
+          response = makeError(
+            ref,
+            "claim_unfaithful",
+            `Claim contradicts or invents content not in ${parsed.file}: ${unfaithful.reason}`,
+          );
+        } else if (claim && claimMatch && !claimMatch.found) {
           response = makeError(
             ref,
             "claim_mismatch",
@@ -197,11 +209,6 @@ export async function resolveCitation(
         const sections = isCodeFile(parsed.file)
           ? extractCodeSections(content)
           : extractSections(content);
-        // Accept any of: GitHub-style slug ("out-of-scope"), the literal
-        // heading ("Out of scope"), or a legacy underscore form
-        // ("out_of_scope"). Normalize the fragment through slugify so we
-        // compare apples to apples; treat `_` as a word separator first so
-        // underscored variants normalize to the same slug.
         const targetSlug = slugify(parsed.section.replace(/_/g, " "));
         const section = sections.find((s) => s.slug === targetSlug);
         if (!section) {
@@ -213,8 +220,23 @@ export async function resolveCitation(
           );
         } else {
           const body = sectionBody(content, section);
-          const claimMatch = claim ? matchClaim(claim, body) : null;
-          if (claim && claimMatch && !claimMatch.found) {
+          let claimMatch = claim ? matchClaim(claim, body) : null;
+          let unfaithful: { reason: string } | null = null;
+          if (claim && claimMatch?.match_kind === "below_threshold") {
+            const r = await resolveLowConfidence(claimMatch, body, claim);
+            if (r.unfaithful) {
+              unfaithful = r.unfaithful;
+            } else if (r.replacement) {
+              claimMatch = r.replacement;
+            }
+          }
+          if (unfaithful) {
+            response = makeError(
+              ref,
+              "claim_unfaithful",
+              `Claim contradicts or invents content not in section "${parsed.section}" of ${parsed.file}: ${unfaithful.reason}`,
+            );
+          } else if (claim && claimMatch && !claimMatch.found) {
             response = makeError(
               ref,
               "claim_mismatch",
