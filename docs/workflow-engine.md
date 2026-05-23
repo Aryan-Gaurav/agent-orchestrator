@@ -712,6 +712,40 @@ The package will be built across multiple AO sessions, each opening a PR against
 - Footer is auto-appended to every agent prompt (no per-step author work
   required)
 
+### Phase 4a — Bug fixes for straight DAG (1 session)
+**Files:** `packages/workflow/src/cli.ts`, `packages/workflow/src/engine/*`, `docs/aow-guide.md`
+
+After 9 dogfood runs + 3 multi-workflow tests, four open issues block a clean straight-DAG run for a new user. None require schema or engine-semantics changes; all are surgical fixes in the CLI / spawn / cleanup paths.
+
+**Open findings to close** (see `docs/aow-dogfood-findings.md`):
+
+1. **Finding 14 — silent fallback to `./workflow.yaml`.** `aow run <file.yaml>` parses the positional as a workflow ID (currently dead code) and silently loads `./workflow.yaml`. Fix:
+   - Positional becomes a file path. `aow run <file>` runs `<file>`. `aow run` (no args) keeps `./workflow.yaml` default.
+   - Drop `--workflow-file` (or one-release deprecation alias with a warning).
+   - Add `--id <override>` flag to override the workflow's `id:` for this invocation (use case: same workflow file, multiple features). Reject if effective `artifacts_dir` would collide with another live run.
+   - Sanity check: positional that doesn't end in `.yaml`/`.yml` and isn't a known workflow ID → error with "did you mean `<arg>.yaml`?"
+
+2. **Finding 15 — multi-process state-store race.** Two `aow run` invocations briefly wrote to overlapping state dirs in Test 1. Fix: PID-aware lock file at `.workflow-state/runs/<id>/lock`. Second process refuses to operate if holder PID is alive; takes over with a warning if dead (crash recovery).
+
+3. **Finding 10 — zombie tmux sessions persist after run end.** End-of-run cleanup pass: kill all AO sessions registered to the completed run id. Phase 3.9 added some cleanup but it doesn't fire on the natural-completion path.
+
+4. **Finding 17 (partial) — schema discoverability.** Three small improvements:
+   - `aow init <name>` scaffolds a minimal valid `workflow.yaml` (one agent step + comments).
+   - Expand `docs/aow-guide.md` §3 with a "required vs optional fields" table for steps.
+   - Export JSON schema for editor autocomplete (Zod → JSON Schema; one-liner via `zod-to-json-schema`). Reference via `$schema:` in YAML.
+
+**Out of scope for 4a** (defer to Phase 4 / 5):
+- Finding 17's deeper UX work (autocompletion across editors, schema hosting).
+- DAG features beyond straight chains (fan-out/fan-in).
+- Dashboard "group by workflow" toggle (§15.5).
+
+**Acceptance:**
+- `aow run workflow-foo.yaml` (positional, no flag) loads `workflow-foo.yaml`, not `workflow.yaml`.
+- Two concurrent `aow run` against the same run dir → second errors out with PID-of-holder in the message.
+- After a run completes, `tmux ls | grep <prefix>` returns no entries from that run.
+- `aow init demo` writes a working `workflow.yaml` that passes `aow run` with no edits.
+- All existing tests stay green. New tests for: positional file resolution, `--id` override, lock file, end-of-run sweep, `aow init` snapshot.
+
 ### Phase 4 — Examples + docs (1 session)
 **Files:** examples/*, README.md, `aow --help` polish
 **Acceptance:** Fresh user can clone, follow README, run a workflow
