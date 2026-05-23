@@ -582,3 +582,60 @@ The workflow engine is **v1-shippable**. From a 25-line `requirements.md` to a t
 **Remaining open issue:** Finding 10 (zombie sessions). Cosmetic, not blocking, candidate for Phase 3.13. End-of-run cleanup pass: kill all sessions registered to the completed run id.
 
 **Phase 4 unblocked:** Examples + docs polish. The hello-world doc (`docs/aow-hello-world.md`) is already written. Phase 4 packages this dogfood into the canonical first-contact UX (move fixture into `packages/workflow/examples/url-shortener/`, README top-level, `aow --help` polish).
+---
+
+## Multi-Workflow Test 1 — Same Repo, Two Concurrent Workflows (2026-05-23)
+
+Fixture: `~/aow-test-url-shortener/` with two workflow files side by side — `workflow.yaml` (4-step URL shortener) and `workflow-rate-limiter.yaml` (2-step rate limiter, different `id:`, different `artifacts_dir`).
+
+### Outcome
+
+| Workflow | Run ID | Steps | Outcome |
+|---|---|---|---|
+| URL shortener (A) | `wf-url-shortener-build-20260523T010951` | 4 | ✅ all first-try |
+| Rate limiter (B) | `wf-rate-limiter-build-20260523T010954` | 2 | ✅ all first-try |
+
+Launched 3 sec apart in the same project. 6 concurrent `ust-N` sessions across both runs. Both completed without collisions in run-dirs, branches, or artifacts. Phase 3.9 Fix 5 (run-id-suffixed branches) is what made this work cleanly — branch names like `aow-url-shortener-build-design-1-wf-url-shortener-build-…` and `aow-rate-limiter-build-design-1-wf-rate-limiter-build-…` are naturally disjoint.
+
+**Multi-workflow on a single repo: works end-to-end.** No engine changes required.
+
+### Finding 14 — `aow run <file.yaml>` silently loads `./workflow.yaml`
+
+The CLI signature is `aow run [workflow]` where the positional is a (currently-unused) workflow ID, NOT a file path. The file path is `--workflow-file <path>`. So:
+
+```bash
+aow run workflow-rate-limiter.yaml     # ❌ silently loads ./workflow.yaml
+aow run --workflow-file workflow-rate-limiter.yaml  # ✅ correct
+```
+
+This compounded badly with the resume-existing-run logic: the second invocation "loaded" workflow A, found A's pending run, joined it. Two `aow` processes wrote to the same `state.json` for a few seconds. No corruption this time; clearly a race waiting to bite.
+
+This is the single biggest UX papercut surfaced so far. Three problems in one:
+
+1. Silent fallback. `.yaml` as positional → wrong file loaded, no warning.
+2. The `[workflow]` positional is dead code today (not consumed anywhere).
+3. The auto-resume logic compounds the silent-wrong-file load into a multi-process race.
+
+### Phase 3.13 (or Phase 4a) — CLI ergonomics
+
+Three changes to roll together:
+
+1. **Positional becomes a file path.** `aow run <file>` runs `<file>`. `aow run` (no args) keeps `./workflow.yaml` default. Drop `--workflow-file` (or keep it for one release as a deprecated alias with a warning).
+
+2. **`--id <override>` flag.** Override the workflow.yaml's `id:` for this invocation only. Use case: run the same workflow file for multiple concrete features (`aow run workflow.yaml --id login-feature` vs `--id signup-feature`). Effective ID is the override (or file's `id:` if no override). Affects:
+   - Run dir name (`wf-<id>-<timestamp>`)
+   - Branch prefix
+   - Resume lookup (find runs by effective ID, not file's ID)
+   - Should **require** that `artifacts_dir` is templated (e.g., contains `{id}`) when `--id` is passed, OR error explicitly — else two `--id` runs overwrite each other's outputs. Better: explicit error if both runs would share `artifacts_dir`.
+
+3. **Sanity check on positional arg.** If positional doesn't end in `.yaml`/`.yml` AND isn't a known workflow ID, error loudly with "did you mean `<arg>.yaml`?" instead of silently loading default.
+
+Total scope: ~50 LOC in `cli.ts`, doc updates in `aow-guide.md` §CLI commands, one new flag's worth of tests.
+
+### Finding 15 — Multi-process state-store contention (low-severity, undetermined)
+
+When two `aow run` invocations briefly both pointed at the same run dir (during the Finding 14 incident), I saw no errors and no corrupted `state.json`. Either:
+- State-store's atomic write (write-then-rename) protected us by luck of timing.
+- Or contention was so brief no race window was hit.
+
+Either way, Phase 3.13 should add a **PID-aware lock file** in the run dir (`.workflow-state/runs/<id>/lock`) that prevents a second `aow` process from operating on a run dir owned by another live PID. If the lock holder's PID is dead (crash recovery), allow takeover with a warning. §15.6 of the design doc already flags this; the multi-workflow test just confirmed it's not theoretical.
