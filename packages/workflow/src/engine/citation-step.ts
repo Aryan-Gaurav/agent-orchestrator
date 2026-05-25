@@ -49,7 +49,8 @@ export async function runCitationLint(args: CitationLintArgs): Promise<LintRepor
 
 export function formatFinding(f: CitationFinding): string {
   const ref = f.ref ? `:${f.ref}` : "";
-  return `- [${f.code}] ${f.outputFile}${ref} — ${f.message}`;
+  const detail = f.detail ? `\n    ${f.detail}` : "";
+  return `- [${f.code}] ${f.outputFile}${ref} — ${f.message}${detail}`;
 }
 
 export function toPersistedReport(report: LintReport): PersistedLintReport {
@@ -85,7 +86,13 @@ export async function writeCitationFeedback(
   report: LintReport,
 ): Promise<void> {
   const sections: string[] = [
-    "Citation linter rejected this attempt. Fix every error below and re-run.",
+    "Citation linter rejected the previous attempt. Address EVERY error below before re-submitting.",
+    "",
+    "How to fix each error code:",
+    "- section_not_found — your `#<slug>` does not exist in the cited file. The `available:` line lists every real slug. Pick one of those OR remove the citation if no section is relevant. Do NOT invent a new slug or re-submit the same one.",
+    "- ambiguous_section — your `#<slug>` matches multiple headings. Make it more specific (add more `-token`s from the heading you mean) OR remove the citation.",
+    "- claim_unfaithful / claim_mismatch — the section is real but the `claim=` text is not supported by it. Either restate the claim using the section's actual words, or remove the citation.",
+    "- file_not_found / outside_artifacts_dir / malformed_ref — the citation target is wrong; fix the path or drop the citation.",
     "",
     "Errors (must fix):",
     ...report.errors.map(formatFinding),
