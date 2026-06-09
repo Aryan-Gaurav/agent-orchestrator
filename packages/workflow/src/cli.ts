@@ -14,7 +14,7 @@ import { decideGate, readPendingGates } from "./approvals.js";
 import { createAoContext, type AoContext } from "./ao-client.js";
 import { ensureAowConfig } from "./cli/bootstrap.js";
 import { warnIfBuildStale } from "./cli/build-freshness.js";
-import { cleanCmd as runCleanCmd, type CleanCmdOpts } from "./cli/clean.js";
+import { cleanCmd as runCleanCmd, runClean, type CleanCmdOpts } from "./cli/clean.js";
 import { ensureDaemonRunning } from "./cli/daemon-check.js";
 import { emitHopsForRun } from "./cli/render-hops.js";
 import { runWorkflow } from "./engine.js";
@@ -49,6 +49,7 @@ interface RunCommandOpts extends GlobalOpts {
   rerun?: string;
   input?: string[];
   detach?: boolean;
+  keepSessions?: boolean;
 }
 
 function buildSelector(opts: RunCommandOpts): Selector {
@@ -120,12 +121,62 @@ async function runCmd(workflowId: string | undefined, opts: RunCommandOpts): Pro
     selector,
     detach: opts.detach === true,
   });
+  const sweep = await maybeSweepRunSessions({
+    runId: result.runId,
+    status: result.status,
+    workflowPath,
+    detach: opts.detach === true,
+    keepSessions: opts.keepSessions === true,
+  });
   emitResult("run", {
     run_id: result.runId,
     status: result.status,
     awaiting_approvals: result.awaitingApprovals,
     failed: result.failed,
+    sessions_killed: sweep.killed,
   });
+}
+
+export interface SweepDecisionOpts {
+  detach: boolean;
+  keepSessions: boolean;
+}
+
+export function shouldSweepAfterRun(opts: SweepDecisionOpts, status: string): boolean {
+  if (opts.keepSessions) return false;
+  if (opts.detach) return false;
+  return status === "completed" || status === "failed";
+}
+
+export interface MaybeSweepArgs extends SweepDecisionOpts {
+  runId: RunID;
+  status: string;
+  workflowPath: string;
+  aoContextFactory?: (projectId: string) => Promise<AoContext>;
+}
+
+export async function maybeSweepRunSessions(args: MaybeSweepArgs): Promise<{ killed: string[] }> {
+  if (!shouldSweepAfterRun(args, args.status)) return { killed: [] };
+  try {
+    const workflow = await loadWorkflow(args.workflowPath);
+    const factory = args.aoContextFactory ?? createAoContext;
+    const aoCtx = await factory(workflow.project_id);
+    const result = await runClean({
+      workflow,
+      aoCtx,
+      runId: args.runId,
+      all: false,
+    });
+    if (result.killed.length > 0) {
+      log.info(`end-of-run sweep killed ${result.killed.length} session(s) for ${args.runId}`);
+    }
+    return { killed: result.killed };
+  } catch (err) {
+    log.warn(
+      `end-of-run sweep failed for ${args.runId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { killed: [] };
+  }
 }
 
 async function resumeCmd(runId: RunID, opts: GlobalOpts): Promise<void> {
@@ -334,6 +385,7 @@ function buildProgram(): Command {
     .option("--rerun <step>", "force re-run of a completed step")
     .option("--input <name=path...>", "inject an external artifact under a name")
     .option("--detach", "exit after first awaiting gate instead of blocking")
+    .option("--keep-sessions", "skip end-of-run AO session sweep (default: kill on completed/failed)")
     .action(async (workflow: string | undefined, cmdOpts: Record<string, unknown>, command) => {
       const merged = { ...command.parent?.opts(), ...cmdOpts } as RunCommandOpts;
       await runCmd(workflow, merged);
